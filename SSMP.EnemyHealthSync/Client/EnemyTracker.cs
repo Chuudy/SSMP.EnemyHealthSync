@@ -381,7 +381,7 @@ internal static class EnemyTracker
             tracked.Owned = nowOwned;
             if (nowOwned)
             {
-                // Take over: the enemy runs its own AI again, starting from where it was paused
+                // Take over: the enemy runs its own AI again, carrying on from the previous owner's FSM states
                 tracked.OwnedSince = now;
                 tracked.Mirror.Unpuppetize();
                 Log.Debug($"Took over {tracked.Hm.name} ({tracked.Id})");
@@ -604,6 +604,10 @@ internal static class EnemyTracker
                 {
                     tracked.Mirror.Tick(Time.deltaTime);
                 }
+            }
+            else
+            {
+                tracked.Mirror.TickOwned();
             }
 
             if (sendState && tracked.Owned && !tracked.KnownDead && !hm.isDead &&
@@ -854,7 +858,7 @@ internal static class EnemyTracker
         tracked.PendingDeath = false;
 
         // Give the enemy its FSMs back so its own death sequence can play
-        tracked.Mirror.Unpuppetize();
+        tracked.Mirror.Unpuppetize(resumeOwnerState: false);
 
         ApplyingRemote = true;
         try

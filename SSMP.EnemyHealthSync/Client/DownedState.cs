@@ -468,10 +468,10 @@ internal static class DownedState
         }
     }
 
+    /// <summary>The hero's sprite animator: the one SSMP watches to send the hero's animations.</summary>
     private static tk2dSpriteAnimator? GetAnimator(HeroController hero)
     {
-        var animCtrl = hero.animCtrl;
-        var animator = animCtrl != null ? animCtrl.GetComponent<tk2dSpriteAnimator>() : null;
+        var animator = hero.GetComponent<tk2dSpriteAnimator>();
         if (animator != null)
         {
             Clips.Resolve(animator);
@@ -480,16 +480,19 @@ internal static class DownedState
         return animator;
     }
 
+    /// <summary>
+    /// Play a hero clip directly on the sprite animator. HeroAnimationController.PlayClip does
+    /// nothing while animation control is stopped, which it is for the whole downed state.
+    /// </summary>
     private static void PlayClip(HeroController hero, string? clip)
     {
-        // Resolves the clip names on first use
-        GetAnimator(hero);
-        if (clip == null || hero.animCtrl == null)
+        var animator = GetAnimator(hero);
+        if (clip == null || animator == null)
         {
             return;
         }
 
-        hero.animCtrl.PlayClip(clip);
+        animator.Play(clip);
     }
 
     /// <summary>Length of one play-through of a hero clip, 0 if unknown.</summary>

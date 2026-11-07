@@ -129,7 +129,7 @@ public sealed class EnemyDeathPacket : IPacketData
 }
 
 /// <summary>
-/// Snapshot of one enemy on the room host, applied to the puppet copies of the other players.
+/// Snapshot of one enemy on its owner, applied to the puppet copies of the other players.
 /// Unreliable: a newer snapshot always follows, so lost ones don't matter.
 /// </summary>
 public sealed class EnemyStatePacket : IPacketData
@@ -163,6 +163,16 @@ public sealed class EnemyStatePacket : IPacketData
     /// <summary>Bit i: the Collider2D of hitbox object i is enabled.</summary>
     public uint HitboxColliderEnabled { get; set; }
 
+    /// <summary>
+    /// Active state of each of the enemy's PlayMaker FSMs (in hierarchy order), as an index into
+    /// that FSM's state list, or <see cref="NoFsmState"/>. A new owner resumes the AI from these
+    /// states instead of the FSM's start state (which is often "asleep").
+    /// </summary>
+    public ushort[] FsmStates { get; set; } = [];
+
+    public const ushort NoFsmState = ushort.MaxValue;
+    public const int MaxFsms = 16;
+
     public void WriteData(IPacket packet)
     {
         packet.Write(EnemyId);
@@ -176,6 +186,13 @@ public sealed class EnemyStatePacket : IPacketData
         packet.Write(Hp);
         packet.Write(HitboxActive);
         packet.Write(HitboxColliderEnabled);
+
+        var fsmCount = (byte) System.Math.Min(FsmStates.Length, MaxFsms);
+        packet.Write(fsmCount);
+        for (var i = 0; i < fsmCount; i++)
+        {
+            packet.Write(FsmStates[i]);
+        }
     }
 
     public void ReadData(IPacket packet)
@@ -190,6 +207,13 @@ public sealed class EnemyStatePacket : IPacketData
         Hp = packet.ReadInt();
         HitboxActive = packet.ReadUInt();
         HitboxColliderEnabled = packet.ReadUInt();
+
+        var fsmCount = System.Math.Min((int) packet.ReadByte(), MaxFsms);
+        FsmStates = new ushort[fsmCount];
+        for (var i = 0; i < fsmCount; i++)
+        {
+            FsmStates[i] = packet.ReadUShort();
+        }
     }
 }
 

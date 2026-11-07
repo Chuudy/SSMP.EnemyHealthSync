@@ -29,8 +29,18 @@ internal sealed class EnemyMirror
 
     // What Puppetize changed, so Unpuppetize can restore it exactly
     private readonly List<Behaviour> _disabledBehaviours = new();
+    private readonly Dictionary<PlayMakerFSM, bool> _restartOnEnable = new();
     private Rigidbody2D? _body;
     private RigidbodyType2D _bodyType;
+
+    /// <summary>The enemy's FSMs in hierarchy order; FSM i means the same FSM on every client.</summary>
+    private readonly PlayMakerFSM[] _fsms;
+
+    /// <summary>Puppet side: the owner's latest FSM states, resumed from when we take over.</summary>
+    private ushort[] _ownerFsmStates = [];
+
+    /// <summary>Re-check the resumed FSM states once more on the next frame (an FSM may start late).</summary>
+    private bool _fsmResyncPending;
 
     private Vector2 _target;
     private bool _hasTarget;
@@ -60,6 +70,7 @@ internal sealed class EnemyMirror
         }
 
         CollectHitboxes();
+        _fsms = _go.GetComponentsInChildren<PlayMakerFSM>(true).Take(EnemyStatePacket.MaxFsms).ToArray();
     }
 
     /// <summary>
@@ -146,6 +157,7 @@ internal sealed class EnemyMirror
 
         packet.HitboxActive = active;
         packet.HitboxColliderEnabled = colliderEnabled;
+        packet.FsmStates = CaptureFsmStates();
 
         if (_lastSent != null && now - _lastSentTime < heartbeat && SameState(_lastSent, packet))
         {
@@ -160,7 +172,97 @@ internal sealed class EnemyMirror
     private static bool SameState(EnemyStatePacket a, EnemyStatePacket b) =>
         Mathf.Abs(a.X - b.X) < PositionEpsilon && Mathf.Abs(a.Y - b.Y) < PositionEpsilon &&
         a.ScaleXNegative == b.ScaleXNegative && a.Active == b.Active && a.Clip == b.Clip && a.Hp == b.Hp &&
-        a.HitboxActive == b.HitboxActive && a.HitboxColliderEnabled == b.HitboxColliderEnabled;
+        a.HitboxActive == b.HitboxActive && a.HitboxColliderEnabled == b.HitboxColliderEnabled &&
+        a.FsmStates.AsSpan().SequenceEqual(b.FsmStates);
+
+    private ushort[] CaptureFsmStates()
+    {
+        if (_fsms.Length == 0)
+        {
+            return [];
+        }
+
+        var states = new ushort[_fsms.Length];
+        for (var i = 0; i < _fsms.Length; i++)
+        {
+            states[i] = ActiveStateIndex(_fsms[i]);
+        }
+
+        return states;
+    }
+
+    private static ushort ActiveStateIndex(PlayMakerFSM? fsm)
+    {
+        if (fsm == null)
+        {
+            return EnemyStatePacket.NoFsmState;
+        }
+
+        var name = fsm.ActiveStateName;
+        var states = fsm.FsmStates;
+        if (string.IsNullOrEmpty(name) || states == null)
+        {
+            return EnemyStatePacket.NoFsmState;
+        }
+
+        for (var i = 0; i < states.Length && i < EnemyStatePacket.NoFsmState; i++)
+        {
+            if (states[i] != null && states[i].Name == name)
+            {
+                return (ushort) i;
+            }
+        }
+
+        return EnemyStatePacket.NoFsmState;
+    }
+
+    /// <summary>
+    /// Move each FSM to the owner's last known state, so the AI carries on with what the enemy was
+    /// doing (chasing, attacking) instead of starting over (often asleep or idle).
+    /// </summary>
+    private void ResumeOwnerFsmStates()
+    {
+        for (var i = 0; i < _fsms.Length && i < _ownerFsmStates.Length; i++)
+        {
+            var fsm = _fsms[i];
+            var index = _ownerFsmStates[i];
+            if (fsm == null || !fsm.enabled || index == EnemyStatePacket.NoFsmState)
+            {
+                continue;
+            }
+
+            var states = fsm.FsmStates;
+            if (states == null || index >= states.Length || states[index] == null)
+            {
+                continue;
+            }
+
+            var name = states[index].Name;
+            if (fsm.ActiveStateName == name)
+            {
+                continue;
+            }
+
+            try
+            {
+                fsm.SetState(name);
+            }
+            catch (Exception e)
+            {
+                Utils.Log.Debug($"Could not resume {_go.name} FSM '{fsm.FsmName}' in state '{name}': {e.Message}");
+            }
+        }
+    }
+
+    /// <summary>Called every frame while we own the enemy.</summary>
+    internal void TickOwned()
+    {
+        if (_fsmResyncPending)
+        {
+            _fsmResyncPending = false;
+            ResumeOwnerFsmStates();
+        }
+    }
 
     private ushort CurrentClipId()
     {
@@ -184,11 +286,25 @@ internal sealed class EnemyMirror
         }
 
         IsPuppet = true;
+        _fsmResyncPending = false;
         _disabledBehaviours.Clear();
+        _restartOnEnable.Clear();
 
-        // FSMs drive almost all enemy behaviour, including the ones on attack child objects
+        // FSMs drive almost all enemy behaviour, including the ones on attack child objects.
+        // Re-enabling an FSM normally restarts it from its start state; pause it in place instead.
         foreach (var fsm in _go.GetComponentsInChildren<PlayMakerFSM>(true))
         {
+            if (fsm == null)
+            {
+                continue;
+            }
+
+            if (fsm.enabled && fsm.Fsm != null)
+            {
+                _restartOnEnable[fsm] = fsm.Fsm.RestartOnEnable;
+                fsm.Fsm.RestartOnEnable = false;
+            }
+
             Disable(fsm);
         }
 
@@ -248,8 +364,12 @@ internal sealed class EnemyMirror
                name.Contains("Corpse");
     }
 
-    /// <summary>Give the enemy its own AI back (we became its owner, its owner went quiet, or it is about to die).</summary>
-    internal void Unpuppetize()
+    /// <summary>
+    /// Give the enemy its own AI back (we became its owner, its owner went quiet, or it is about to
+    /// die). With <paramref name="resumeOwnerState"/>, its FSMs carry on from the owner's last
+    /// known states instead of where they were paused.
+    /// </summary>
+    internal void Unpuppetize(bool resumeOwnerState = true)
     {
         if (!IsPuppet)
         {
@@ -270,6 +390,22 @@ internal sealed class EnemyMirror
         }
 
         _disabledBehaviours.Clear();
+
+        if (resumeOwnerState && _ownerFsmStates.Length > 0)
+        {
+            ResumeOwnerFsmStates();
+            _fsmResyncPending = true;
+        }
+
+        foreach (var pair in _restartOnEnable)
+        {
+            if (pair.Key != null && pair.Key.Fsm != null)
+            {
+                pair.Key.Fsm.RestartOnEnable = pair.Value;
+            }
+        }
+
+        _restartOnEnable.Clear();
 
         if (_body != null)
         {
@@ -312,6 +448,7 @@ internal sealed class EnemyMirror
         }
 
         PlayClip(state.Clip);
+        _ownerFsmStates = state.FsmStates;
 
         // Puppets never die on their own; the host's death packet does that
         _hm.hp = Math.Max(1, state.Hp);
