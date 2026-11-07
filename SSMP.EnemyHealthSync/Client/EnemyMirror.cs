@@ -43,14 +43,15 @@ internal sealed class EnemyMirror
     /// <summary>Puppet side: the owner's latest FSM states, resumed from when we take over.</summary>
     private ushort[] _ownerFsmStates = [];
 
-    /// <summary>
-    /// After taking over, the FSMs restart (which sets up their variables); a moment later they jump
-    /// to the owner's states. Unscaled time, or negative when nothing is pending.
-    /// </summary>
-    private float _resumeFsmAt = -1f;
+    /// <summary>Puppet side: the owner's latest animation clip ID.</summary>
+    private ushort _ownerClip = EnemyStatePacket.NoClip;
 
-    /// <summary>Let restarted FSMs run their setup states before moving them to the owner's states.</summary>
-    private const float FsmResumeDelay = 0.1f;
+    /// <summary>
+    /// After taking over, the FSMs restart (which sets up their variables); on the next frame they
+    /// jump to the owner's states. The frame to do that on, or negative when nothing is pending.
+    /// Until then no snapshots are sent, so nobody sees the restarted (often asleep) enemy.
+    /// </summary>
+    private int _resumeFsmFrame = -1;
 
     private Vector2 _target;
     private bool _hasTarget;
@@ -138,6 +139,13 @@ internal sealed class EnemyMirror
     /// </summary>
     internal bool TryCapture(uint id, float now, float heartbeat, out EnemyStatePacket packet)
     {
+        if (_resumeFsmFrame >= 0)
+        {
+            // Just took over: the FSMs are in their start state until they resume the owner's
+            packet = null!;
+            return false;
+        }
+
         var pos = _go.transform.position;
         packet = new EnemyStatePacket
         {
@@ -276,10 +284,68 @@ internal sealed class EnemyMirror
     /// <summary>Called every frame while we own the enemy.</summary>
     internal void TickOwned()
     {
-        if (_resumeFsmAt >= 0f && Time.unscaledTime >= _resumeFsmAt)
+        if (_resumeFsmFrame < 0 || Time.frameCount < _resumeFsmFrame)
         {
-            _resumeFsmAt = -1f;
-            ResumeOwnerFsmStates();
+            return;
+        }
+
+        _resumeFsmFrame = -1;
+        var restartClip = _animator != null ? _animator.CurrentClip : null;
+        ResumeOwnerFsmStates();
+        FixRestartClip(restartClip);
+    }
+
+    /// <summary>
+    /// If the enemy still shows the animation its restart put on (e.g. asleep) after jumping to the
+    /// owner's states, show the owner's animation instead. Some states don't play a clip of their
+    /// own because the skipped wake-up state already did.
+    /// </summary>
+    private void FixRestartClip(tk2dSpriteAnimationClip? restartClip)
+    {
+        if (_animator == null || restartClip == null || _animator.CurrentClip != restartClip ||
+            _ownerClip == EnemyStatePacket.NoClip || _animator.Library == null)
+        {
+            return;
+        }
+
+        var clips = _animator.Library.clips;
+        if (clips == null || _ownerClip >= clips.Length || clips[_ownerClip] == null ||
+            clips[_ownerClip] == restartClip)
+        {
+            return;
+        }
+
+        Utils.Log.Debug($"{_go.name} still showed '{restartClip.name}' after resuming, playing the owner's " +
+                        $"'{clips[_ownerClip].name}'");
+        _animator.Play(clips[_ownerClip]);
+    }
+
+    /// <summary>
+    /// Whether an attack hitbox (a child object, not the body) is active and can deal damage.
+    /// Enemies aren't handed over mid-attack, which would cut the attack off.
+    /// </summary>
+    internal bool IsAttacking
+    {
+        get
+        {
+            for (var i = 0; i < _hitboxObjects.Count; i++)
+            {
+                var obj = _hitboxObjects[i];
+                var damager = _hitboxDamagers[i];
+                if (obj == null || obj == _go || damager == null || !obj.activeInHierarchy ||
+                    !damager.enabled || damager.damageDealt <= 0)
+                {
+                    continue;
+                }
+
+                var col = _hitboxColliders[i];
+                if (col == null || col.enabled)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 
@@ -305,7 +371,7 @@ internal sealed class EnemyMirror
         }
 
         IsPuppet = true;
-        _resumeFsmAt = -1f;
+        _resumeFsmFrame = -1;
         _disabledBehaviours.Clear();
         _savedDamage.Clear();
 
@@ -374,7 +440,7 @@ internal sealed class EnemyMirror
     /// <summary>
     /// Give the enemy its own AI back (we became its owner, its owner went quiet, or it is about to
     /// die). Its FSMs restart, which runs their setup (finding the hero, movement speeds). With
-    /// <paramref name="resumeOwnerState"/>, a moment later they jump to the owner's last known
+    /// <paramref name="resumeOwnerState"/>, on the next frame they jump to the owner's last known
     /// states, so the enemy carries on (chasing, attacking) instead of starting over asleep.
     /// Entering those states fresh also sets their movement again.
     /// </summary>
@@ -411,9 +477,7 @@ internal sealed class EnemyMirror
 
         _savedDamage.Clear();
 
-        _resumeFsmAt = resumeOwnerState && _ownerFsmStates.Length > 0
-            ? Time.unscaledTime + FsmResumeDelay
-            : -1f;
+        _resumeFsmFrame = resumeOwnerState && _ownerFsmStates.Length > 0 ? Time.frameCount + 1 : -1;
 
         if (_body != null)
         {
@@ -457,6 +521,7 @@ internal sealed class EnemyMirror
 
         PlayClip(state.Clip);
         _ownerFsmStates = state.FsmStates;
+        _ownerClip = state.Clip;
 
         // Puppets never die on their own; the host's death packet does that
         _hm.hp = Math.Max(1, state.Hp);

@@ -55,6 +55,9 @@ internal static class EnemyTracker
         internal float OwnedSince;
         internal float LastHandoverSent = -999f;
 
+        /// <summary>Since when a handover has been waiting for the enemy's attack to end, or -1.</summary>
+        internal float AttackingSince = -1f;
+
         /// <summary>Last time a state packet arrived for this enemy (puppet side).</summary>
         internal float LastStateTime = -999f;
     }
@@ -92,7 +95,8 @@ internal static class EnemyTracker
 
     private const float HandoverCheckInterval = 0.25f;
     private const float HandoverRetryInterval = 1f;
-    private const float HandoverHold = 2f;
+    private const float HandoverHold = 5f;
+    private const float MaxAttackHandoverWait = 3f;
     private const float HandoverMargin = 4f;
     private const float BossHandoverHold = 8f;
     private const float BossHandoverMargin = 8f;
@@ -478,6 +482,25 @@ internal static class EnemyTracker
             if (!downed && now - tracked.OwnedSince < hold)
             {
                 continue;
+            }
+
+            // Handing over mid-attack would cut the attack off; wait until it's done. Enemies with
+            // always-dangerous parts (e.g. spikes) would never finish, so the wait is capped.
+            if (!downed && tracked.Mirror.IsAttacking)
+            {
+                if (tracked.AttackingSince < 0f)
+                {
+                    tracked.AttackingSince = now;
+                }
+
+                if (now - tracked.AttackingSince < MaxAttackHandoverWait)
+                {
+                    continue;
+                }
+            }
+            else
+            {
+                tracked.AttackingSince = -1f;
             }
 
             Vector2 enemyPos = hm.transform.position;
