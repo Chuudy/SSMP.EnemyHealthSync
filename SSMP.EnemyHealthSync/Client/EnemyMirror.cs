@@ -23,13 +23,17 @@ internal sealed class EnemyMirror
     private readonly tk2dSpriteAnimator? _animator;
     private readonly Dictionary<tk2dSpriteAnimationClip, ushort> _clipIds = new();
 
-    // Index-aligned: hitbox i is _hitboxObjects[i] with optional collider _hitboxColliders[i]
+    // Index-aligned: hitbox i is _hitboxObjects[i] with optional collider _hitboxColliders[i] and
+    // optional contact damage _hitboxDamagers[i]
     private readonly List<GameObject> _hitboxObjects = new();
     private readonly List<Collider2D?> _hitboxColliders = new();
+    private readonly List<DamageHero?> _hitboxDamagers = new();
+
+    /// <summary>Puppet side: a damager's damage before we set it to 0, to give it back when the owner's is on again.</summary>
+    private readonly Dictionary<DamageHero, int> _savedDamage = new();
 
     // What Puppetize changed, so Unpuppetize can restore it exactly
     private readonly List<Behaviour> _disabledBehaviours = new();
-    private readonly Dictionary<PlayMakerFSM, bool> _restartOnEnable = new();
     private Rigidbody2D? _body;
     private RigidbodyType2D _bodyType;
 
@@ -39,8 +43,14 @@ internal sealed class EnemyMirror
     /// <summary>Puppet side: the owner's latest FSM states, resumed from when we take over.</summary>
     private ushort[] _ownerFsmStates = [];
 
-    /// <summary>Re-check the resumed FSM states once more on the next frame (an FSM may start late).</summary>
-    private bool _fsmResyncPending;
+    /// <summary>
+    /// After taking over, the FSMs restart (which sets up their variables); a moment later they jump
+    /// to the owner's states. Unscaled time, or negative when nothing is pending.
+    /// </summary>
+    private float _resumeFsmAt = -1f;
+
+    /// <summary>Let restarted FSMs run their setup states before moving them to the owner's states.</summary>
+    private const float FsmResumeDelay = 0.1f;
 
     private Vector2 _target;
     private bool _hasTarget;
@@ -104,6 +114,7 @@ internal sealed class EnemyMirror
         {
             _hitboxObjects.Add(obj);
             _hitboxColliders.Add(obj.GetComponent<Collider2D>());
+            _hitboxDamagers.Add(obj.GetComponent<DamageHero>());
         }
     }
 
@@ -139,7 +150,7 @@ internal sealed class EnemyMirror
             Hp = _hm.hp,
         };
 
-        uint active = 0, colliderEnabled = 0;
+        uint active = 0, colliderEnabled = 0, damaging = 0;
         for (var i = 0; i < _hitboxObjects.Count; i++)
         {
             var obj = _hitboxObjects[i];
@@ -153,10 +164,17 @@ internal sealed class EnemyMirror
             {
                 colliderEnabled |= 1u << i;
             }
+
+            var damager = _hitboxDamagers[i];
+            if (damager != null && damager.enabled && damager.damageDealt > 0)
+            {
+                damaging |= 1u << i;
+            }
         }
 
         packet.HitboxActive = active;
         packet.HitboxColliderEnabled = colliderEnabled;
+        packet.HitboxDamaging = damaging;
         packet.FsmStates = CaptureFsmStates();
 
         if (_lastSent != null && now - _lastSentTime < heartbeat && SameState(_lastSent, packet))
@@ -173,6 +191,7 @@ internal sealed class EnemyMirror
         Mathf.Abs(a.X - b.X) < PositionEpsilon && Mathf.Abs(a.Y - b.Y) < PositionEpsilon &&
         a.ScaleXNegative == b.ScaleXNegative && a.Active == b.Active && a.Clip == b.Clip && a.Hp == b.Hp &&
         a.HitboxActive == b.HitboxActive && a.HitboxColliderEnabled == b.HitboxColliderEnabled &&
+        a.HitboxDamaging == b.HitboxDamaging &&
         a.FsmStates.AsSpan().SequenceEqual(b.FsmStates);
 
     private ushort[] CaptureFsmStates()
@@ -257,9 +276,9 @@ internal sealed class EnemyMirror
     /// <summary>Called every frame while we own the enemy.</summary>
     internal void TickOwned()
     {
-        if (_fsmResyncPending)
+        if (_resumeFsmAt >= 0f && Time.unscaledTime >= _resumeFsmAt)
         {
-            _fsmResyncPending = false;
+            _resumeFsmAt = -1f;
             ResumeOwnerFsmStates();
         }
     }
@@ -286,25 +305,13 @@ internal sealed class EnemyMirror
         }
 
         IsPuppet = true;
-        _fsmResyncPending = false;
+        _resumeFsmAt = -1f;
         _disabledBehaviours.Clear();
-        _restartOnEnable.Clear();
+        _savedDamage.Clear();
 
-        // FSMs drive almost all enemy behaviour, including the ones on attack child objects.
-        // Re-enabling an FSM normally restarts it from its start state; pause it in place instead.
+        // FSMs drive almost all enemy behaviour, including the ones on attack child objects
         foreach (var fsm in _go.GetComponentsInChildren<PlayMakerFSM>(true))
         {
-            if (fsm == null)
-            {
-                continue;
-            }
-
-            if (fsm.enabled && fsm.Fsm != null)
-            {
-                _restartOnEnable[fsm] = fsm.Fsm.RestartOnEnable;
-                fsm.Fsm.RestartOnEnable = false;
-            }
-
             Disable(fsm);
         }
 
@@ -366,8 +373,10 @@ internal sealed class EnemyMirror
 
     /// <summary>
     /// Give the enemy its own AI back (we became its owner, its owner went quiet, or it is about to
-    /// die). With <paramref name="resumeOwnerState"/>, its FSMs carry on from the owner's last
-    /// known states instead of where they were paused.
+    /// die). Its FSMs restart, which runs their setup (finding the hero, movement speeds). With
+    /// <paramref name="resumeOwnerState"/>, a moment later they jump to the owner's last known
+    /// states, so the enemy carries on (chasing, attacking) instead of starting over asleep.
+    /// Entering those states fresh also sets their movement again.
     /// </summary>
     internal void Unpuppetize(bool resumeOwnerState = true)
     {
@@ -391,21 +400,20 @@ internal sealed class EnemyMirror
 
         _disabledBehaviours.Clear();
 
-        if (resumeOwnerState && _ownerFsmStates.Length > 0)
+        // Damage the puppet switched off goes back; the enemy's own FSMs manage it from now on
+        foreach (var pair in _savedDamage)
         {
-            ResumeOwnerFsmStates();
-            _fsmResyncPending = true;
-        }
-
-        foreach (var pair in _restartOnEnable)
-        {
-            if (pair.Key != null && pair.Key.Fsm != null)
+            if (pair.Key != null && pair.Key.damageDealt <= 0)
             {
-                pair.Key.Fsm.RestartOnEnable = pair.Value;
+                pair.Key.damageDealt = pair.Value;
             }
         }
 
-        _restartOnEnable.Clear();
+        _savedDamage.Clear();
+
+        _resumeFsmAt = resumeOwnerState && _ownerFsmStates.Length > 0
+            ? Time.unscaledTime + FsmResumeDelay
+            : -1f;
 
         if (_body != null)
         {
@@ -474,6 +482,38 @@ internal sealed class EnemyMirror
             {
                 col.enabled = colliderEnabled;
             }
+
+            ApplyDamaging(_hitboxDamagers[i], (state.HitboxDamaging & (1u << i)) != 0);
+        }
+    }
+
+    /// <summary>
+    /// Make a puppet's contact damage match the owner's: the owner's FSMs switch it on and off
+    /// (asleep, waking, attacking), and the puppet's FSMs are off.
+    /// </summary>
+    private void ApplyDamaging(DamageHero? damager, bool damaging)
+    {
+        if (damager == null)
+        {
+            return;
+        }
+
+        if (damaging)
+        {
+            if (!damager.enabled)
+            {
+                damager.enabled = true;
+            }
+
+            if (damager.damageDealt <= 0)
+            {
+                damager.damageDealt = _savedDamage.TryGetValue(damager, out var saved) && saved > 0 ? saved : 1;
+            }
+        }
+        else if (damager.damageDealt > 0)
+        {
+            _savedDamage[damager] = damager.damageDealt;
+            damager.damageDealt = 0;
         }
     }
 

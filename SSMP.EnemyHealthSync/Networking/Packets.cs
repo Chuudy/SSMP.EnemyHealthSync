@@ -164,6 +164,12 @@ public sealed class EnemyStatePacket : IPacketData
     public uint HitboxColliderEnabled { get; set; }
 
     /// <summary>
+    /// Bit i: the DamageHero of hitbox object i can hurt the hero (enabled, damage above 0).
+    /// Enemy FSMs switch contact damage on and off (asleep, waking, attacking); puppets copy it.
+    /// </summary>
+    public uint HitboxDamaging { get; set; }
+
+    /// <summary>
     /// Active state of each of the enemy's PlayMaker FSMs (in hierarchy order), as an index into
     /// that FSM's state list, or <see cref="NoFsmState"/>. A new owner resumes the AI from these
     /// states instead of the FSM's start state (which is often "asleep").
@@ -186,6 +192,7 @@ public sealed class EnemyStatePacket : IPacketData
         packet.Write(Hp);
         packet.Write(HitboxActive);
         packet.Write(HitboxColliderEnabled);
+        packet.Write(HitboxDamaging);
 
         var fsmCount = (byte) System.Math.Min(FsmStates.Length, MaxFsms);
         packet.Write(fsmCount);
@@ -207,6 +214,7 @@ public sealed class EnemyStatePacket : IPacketData
         Hp = packet.ReadInt();
         HitboxActive = packet.ReadUInt();
         HitboxColliderEnabled = packet.ReadUInt();
+        HitboxDamaging = packet.ReadUInt();
 
         var fsmCount = System.Math.Min((int) packet.ReadByte(), MaxFsms);
         FsmStates = new ushort[fsmCount];

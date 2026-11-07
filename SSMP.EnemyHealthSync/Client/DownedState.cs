@@ -492,6 +492,10 @@ internal static class DownedState
             return;
         }
 
+        // SSMP sends a clip when tk2d's WarpClipToLocalTime shows its first frame, but it reads
+        // clipTime before Play has reset it for the new clip. Left over from the previous clip,
+        // that often isn't frame 0, and the clip never reaches the other players.
+        animator.clipTime = 0f;
         animator.Play(clip);
     }
 
