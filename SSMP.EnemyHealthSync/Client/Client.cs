@@ -26,10 +26,11 @@ internal class Client : ClientAddon
         var receiver = clientApi.NetClient.GetNetworkReceiver<PacketId>(this, Packets.Instantiate);
 
         // Collections are unwrapped by SSMP: the handler is called once per instance.
-        receiver.RegisterPacketHandler<EnemyDamagePacket>(PacketId.EnemyDamage,
-            p => EnemyTracker.OnRemoteDamage(p.EnemyId, p.Damage));
+        receiver.RegisterPacketHandler<EnemyDamagePacket>(PacketId.EnemyDamage, EnemyTracker.OnRemoteDamage);
         receiver.RegisterPacketHandler<EnemyDeathPacket>(PacketId.EnemyDeath,
             p => EnemyTracker.OnRemoteDeath(p.EnemyId));
+        receiver.RegisterPacketHandler<EnemyStatePacket>(PacketId.EnemyState, EnemyTracker.OnRemoteState);
+        receiver.RegisterPacketHandler<RoomOwnershipPacket>(PacketId.RoomOwnership, EnemyTracker.OnRoomOwnership);
 
         clientApi.ClientManager.ConnectEvent += EnemyTracker.OnConnected;
         clientApi.ClientManager.DisconnectEvent += EnemyTracker.OnDisconnected;
@@ -44,10 +45,23 @@ internal class Client : ClientAddon
         Send(() => _sender!.SendSingleData(PacketId.SceneEntered, new SceneEnteredPacket { SceneName = sceneName }));
     }
 
-    internal static void SendDamage(uint enemyId, int damage)
+    internal static void SendDamage(uint enemyId, int damage, float direction, byte attackType)
     {
-        Send(() => _sender!.SendCollectionData(PacketId.EnemyDamage,
-            new EnemyDamagePacket { EnemyId = enemyId, Damage = damage }));
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyDamage, new EnemyDamagePacket
+        {
+            EnemyId = enemyId, Damage = damage, Direction = direction, AttackType = attackType
+        }));
+    }
+
+    internal static void SendState(EnemyStatePacket state)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyState, state));
+    }
+
+    internal static void SendHandover(uint enemyId, ushort toPlayerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.Handover,
+            new HandoverPacket { EnemyId = enemyId, ToPlayerId = toPlayerId }));
     }
 
     internal static void SendDeath(uint enemyId)

@@ -13,4 +13,13 @@ public enum PacketId : byte
 
     /// <summary>Both directions: an enemy died (sent as a collection).</summary>
     EnemyDeath = 2,
+
+    /// <summary>Server -> client: which enemies of its current room the client owns (runs the AI of).</summary>
+    RoomOwnership = 3,
+
+    /// <summary>Enemy owner -> server -> others in the room: enemy position/animation/hitboxes (unreliable collection).</summary>
+    EnemyState = 4,
+
+    /// <summary>Client -> server: the owner of an enemy hands it over to another player (collection).</summary>
+    Handover = 5,
 }

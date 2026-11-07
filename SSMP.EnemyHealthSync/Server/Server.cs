@@ -24,6 +24,8 @@ internal class Server : ServerAddon
         // Collections are unwrapped by SSMP: the handler is called once per instance.
         receiver.RegisterPacketHandler<EnemyDamagePacket>(PacketId.EnemyDamage, EnemyRelay.OnDamage);
         receiver.RegisterPacketHandler<EnemyDeathPacket>(PacketId.EnemyDeath, EnemyRelay.OnDeath);
+        receiver.RegisterPacketHandler<EnemyStatePacket>(PacketId.EnemyState, EnemyRelay.OnState);
+        receiver.RegisterPacketHandler<HandoverPacket>(PacketId.Handover, EnemyRelay.OnHandover);
 
         serverApi.ServerManager.PlayerDisconnectEvent += player => EnemyRelay.OnPlayerDisconnect(player.Id);
         serverApi.ServerManager.ServerShutdownEvent += EnemyRelay.Clear;
@@ -31,10 +33,20 @@ internal class Server : ServerAddon
         Log.Info("Server addon initialized");
     }
 
-    internal static void SendDamage(uint enemyId, int damage, ushort playerId)
+    // Received packets are relayed as-is; they are only read when written out again.
+    internal static void SendDamage(EnemyDamagePacket packet, ushort playerId)
     {
-        Send(() => _sender!.SendCollectionData(PacketId.EnemyDamage,
-            new EnemyDamagePacket { EnemyId = enemyId, Damage = damage }, playerId));
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyDamage, packet, playerId));
+    }
+
+    internal static void SendState(EnemyStatePacket packet, ushort playerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyState, packet, playerId));
+    }
+
+    internal static void SendOwnership(RoomOwnershipPacket packet, ushort playerId)
+    {
+        Send(() => _sender!.SendSingleData(PacketId.RoomOwnership, packet, playerId));
     }
 
     internal static void SendDeath(uint enemyId, ushort playerId)

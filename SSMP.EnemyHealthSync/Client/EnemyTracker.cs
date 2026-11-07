@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using SSMPEnemyHealthSync.Networking;
 using SSMPEnemyHealthSync.Utils;
 using Object = UnityEngine.Object;
 
@@ -9,11 +10,18 @@ namespace SSMPEnemyHealthSync.Client;
 
 /// <summary>
 /// Gives every enemy (HealthManager) in the current room an ID that is the same on every client,
-/// sends local damage/deaths, and applies damage/deaths received from other players.
+/// and keeps the enemies of a room in sync between players.
 ///
-/// SSMP does not sync enemies itself (its entity system is disabled in 0.3.1), so every player runs
-/// their own copy of each enemy. Enemy positions and AI are therefore not shared; only damage and
-/// deaths are.
+/// SSMP does not sync enemies itself (its entity system is disabled in 0.3.1). This addon uses
+/// per-enemy ownership: each enemy's AI runs on one player's game (its owner), which streams the
+/// enemy's position, facing, animation, HP and hitboxes. The other players' copies become puppets
+/// that follow that stream (see <see cref="EnemyMirror"/>). Enemies start out owned by the room
+/// host (the first player in the room, chosen by the server); an owner hands an enemy to a player
+/// who is clearly closer to it, so enemies chase and attack every player.
+/// Damage from any player is sent to the room and applied by the owner; deaths come from the owner.
+///
+/// With SyncMovement off (or before any state arrives) enemies keep their own AI and only damage
+/// and deaths are shared.
 /// </summary>
 internal static class EnemyTracker
 {
@@ -21,6 +29,7 @@ internal static class EnemyTracker
     {
         internal uint Id;
         internal HealthManager Hm = null!;
+        internal EnemyMirror Mirror = null!;
 
         /// <summary>Death already handled (sent or applied); never send or apply it again.</summary>
         internal bool KnownDead;
@@ -33,6 +42,21 @@ internal static class EnemyTracker
 
         /// <summary>A remote death arrived while the enemy was inactive; apply it once it activates.</summary>
         internal bool PendingDeath;
+
+        /// <summary>When HP first reached 0 without isDead being set (bosses with their own death sequence), or -1.</summary>
+        internal float ZeroHpSince = -1f;
+
+        /// <summary>Boss-like enemy: handed over more cautiously.</summary>
+        internal bool IsBoss;
+
+        /// <summary>We run this enemy's AI and stream its state.</summary>
+        internal bool Owned;
+
+        internal float OwnedSince;
+        internal float LastHandoverSent = -999f;
+
+        /// <summary>Last time a state packet arrived for this enemy (puppet side).</summary>
+        internal float LastStateTime = -999f;
     }
 
     private sealed class PendingUpdate
@@ -51,6 +75,36 @@ internal static class EnemyTracker
 
     private static float _lastRescanTime = -999f;
     private const float RescanInterval = 1f;
+
+    /// <summary>Unchanged enemies are still re-sent this often, so puppets recover from lost packets.</summary>
+    private const float StateHeartbeat = 0.5f;
+    private static float _nextStateSendTime;
+
+    /// <summary>
+    /// Bosses with a "special death" may let their own FSM play the death without HealthManager
+    /// setting isDead. HP staying at 0 this long counts as a death; shorter dips are phase changes
+    /// that refill HP.
+    /// </summary>
+    private const float ZeroHpDeathDelay = 1f;
+
+    /// <summary>A puppet whose owner sent nothing for this long gets its own AI back (owner stopped streaming).</summary>
+    private const float PuppetTimeout = 2f;
+
+    private const float HandoverCheckInterval = 0.25f;
+    private const float HandoverRetryInterval = 1f;
+    private const float HandoverHold = 2f;
+    private const float HandoverMargin = 4f;
+    private const float BossHandoverHold = 8f;
+    private const float BossHandoverMargin = 8f;
+    private static float _nextHandoverCheckTime;
+
+    // Ownership of the current room, from the server's RoomOwnership snapshot. We own an enemy when
+    // _isRoomHost XOR _ownershipExceptions.Contains(id). Until the first snapshot we own nothing.
+    private static bool _ownershipKnown;
+    private static bool _isRoomHost;
+    private static readonly HashSet<uint> OwnershipExceptions = new();
+
+    private static readonly List<(ushort Id, Vector2 Position)> NearbyPlayers = new();
 
     private static bool _initialized;
 
@@ -124,10 +178,22 @@ internal static class EnemyTracker
 
     private static void Clear()
     {
+        // Enemies that survive this (e.g. on disconnect) must get their own AI back
+        foreach (var tracked in ByHm.Values)
+        {
+            if (tracked.Hm != null)
+            {
+                tracked.Mirror.Unpuppetize();
+            }
+        }
+
         ByHm.Clear();
         ById.Clear();
         Pending.Clear();
         _lastRescanTime = -999f;
+        _ownershipKnown = false;
+        _isRoomHost = false;
+        OwnershipExceptions.Clear();
     }
 
     /// <summary>Scan the active scene plus any already-loaded additive scenes of the same room.</summary>
@@ -191,16 +257,28 @@ internal static class EnemyTracker
             id++;
         }
 
-        var tracked = new TrackedEnemy { Id = id, Hm = hm };
+        var tracked = new TrackedEnemy
+        {
+            Id = id,
+            Hm = hm,
+            Mirror = new EnemyMirror(hm),
+            IsBoss = hm.hasSpecialDeath || hm.bigEnemyDeath || hm.initHp >= Config.BossHpThreshold,
+        };
         ByHm[hm] = tracked;
         ById[id] = tracked;
+
+        if (OwnsEnemy(id))
+        {
+            tracked.Owned = true;
+            tracked.OwnedSince = Time.unscaledTime;
+        }
 
         if (Pending.TryGetValue(id, out var pending))
         {
             Pending.Remove(id);
             if (pending.Damage > 0)
             {
-                ApplyDamage(tracked, pending.Damage);
+                ApplyDamageClamped(tracked, pending.Damage);
             }
 
             if (pending.Dead)
@@ -265,9 +343,163 @@ internal static class EnemyTracker
         return hash;
     }
 
+    /// <summary>Whether this enemy is currently a puppet (used by the Die patch).</summary>
+    internal static bool IsPuppet(HealthManager hm) =>
+        ByHm.TryGetValue(hm, out var tracked) && tracked.Mirror.IsPuppet;
+
+    // ------------------------------------------------------------------ ownership
+
+    private static bool OwnsEnemy(uint id) => _ownershipKnown && (_isRoomHost ^ OwnershipExceptions.Contains(id));
+
+    internal static void OnRoomOwnership(RoomOwnershipPacket packet)
+    {
+        if (!Active || packet.SceneName != SceneManager.GetActiveScene().name)
+        {
+            return;
+        }
+
+        _ownershipKnown = true;
+        _isRoomHost = packet.IsRoomHost;
+        OwnershipExceptions.Clear();
+        OwnershipExceptions.UnionWith(packet.Exceptions);
+
+        var now = Time.unscaledTime;
+        var owned = 0;
+        foreach (var tracked in ByHm.Values)
+        {
+            var nowOwned = OwnsEnemy(tracked.Id);
+            if (nowOwned)
+            {
+                owned++;
+            }
+
+            if (nowOwned == tracked.Owned || tracked.Hm == null)
+            {
+                continue;
+            }
+
+            tracked.Owned = nowOwned;
+            if (nowOwned)
+            {
+                // Take over: the enemy runs its own AI again, starting from where it was paused
+                tracked.OwnedSince = now;
+                tracked.Mirror.Unpuppetize();
+                Log.Debug($"Took over {tracked.Hm.name} ({tracked.Id})");
+            }
+            else if (Config.SyncMovement && !tracked.KnownDead && !tracked.Hm.isDead)
+            {
+                // Handed away: stop our AI right away so two AIs never run at once. If the new owner
+                // doesn't stream (e.g. SyncMovement off), PuppetTimeout gives it back.
+                tracked.LastStateTime = now;
+                tracked.Mirror.Puppetize();
+                Log.Debug($"Handed over {tracked.Hm.name} ({tracked.Id})");
+            }
+        }
+
+        Log.Debug($"Ownership in {packet.SceneName}: room host={packet.IsRoomHost}, we own {owned}/{ByHm.Count} enemies");
+    }
+
+    internal static void OnRemoteState(EnemyStatePacket packet)
+    {
+        if (!Active || !Config.SyncMovement || OwnsEnemy(packet.EnemyId))
+        {
+            return;
+        }
+
+        // State is unreliable and a newer one always follows, so don't keep it for unknown enemies
+        var tracked = Find(packet.EnemyId, logUnknown: false);
+        if (tracked == null || tracked.KnownDead || tracked.Hm == null || tracked.Hm.isDead)
+        {
+            return;
+        }
+
+        tracked.LastStateTime = Time.unscaledTime;
+        tracked.Mirror.Apply(packet);
+    }
+
+    /// <summary>
+    /// For each enemy we own: if another player in the room is clearly closer to it, hand it to
+    /// them so it chases and attacks them. Only the owner decides, so two players never claim the
+    /// same enemy. Hold time and distance margin prevent flip-flopping; bosses use larger ones.
+    /// </summary>
+    private static void CheckHandovers(float now)
+    {
+        if (!Config.Handover || !Config.SyncMovement || !_ownershipKnown || now < _nextHandoverCheckTime)
+        {
+            return;
+        }
+
+        _nextHandoverCheckTime = now + HandoverCheckInterval;
+
+        var hero = HeroController.SilentInstance;
+        var players = Client.Api?.ClientManager?.Players;
+        if (hero == null || players == null)
+        {
+            return;
+        }
+
+        NearbyPlayers.Clear();
+        foreach (var player in players)
+        {
+            if (player.IsInLocalScene && player.PlayerObject != null)
+            {
+                NearbyPlayers.Add((player.Id, player.PlayerObject.transform.position));
+            }
+        }
+
+        if (NearbyPlayers.Count == 0)
+        {
+            return;
+        }
+
+        Vector2 heroPos = hero.transform.position;
+        var range = Config.HandoverRange;
+
+        foreach (var tracked in ByHm.Values)
+        {
+            var hm = tracked.Hm;
+            if (!tracked.Owned || tracked.KnownDead || !tracked.SeenAlive || hm == null || hm.isDead ||
+                !hm.gameObject.activeInHierarchy || now - tracked.LastHandoverSent < HandoverRetryInterval)
+            {
+                continue;
+            }
+
+            var hold = tracked.IsBoss ? BossHandoverHold : HandoverHold;
+            if (now - tracked.OwnedSince < hold)
+            {
+                continue;
+            }
+
+            Vector2 enemyPos = hm.transform.position;
+            var myDist = Vector2.Distance(heroPos, enemyPos);
+
+            ushort bestId = 0;
+            var bestDist = float.MaxValue;
+            foreach (var (id, pos) in NearbyPlayers)
+            {
+                var dist = Vector2.Distance(pos, enemyPos);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    bestId = id;
+                }
+            }
+
+            var margin = tracked.IsBoss ? BossHandoverMargin : HandoverMargin;
+            if (bestDist > range || bestDist + margin >= myDist)
+            {
+                continue;
+            }
+
+            tracked.LastHandoverSent = now;
+            Log.Debug($"Handing {hm.name} ({tracked.Id}) to player {bestId} ({bestDist:F1} vs our {myDist:F1})");
+            Client.SendHandover(tracked.Id, bestId);
+        }
+    }
+
     // ------------------------------------------------------------------ local events (from patches)
 
-    internal static void OnLocalDamage(HealthManager hm, int damage)
+    internal static void OnLocalDamage(HealthManager hm, int damage, float direction, AttackTypes attackType)
     {
         if (!Active || !Config.SyncHealth || ApplyingRemote || damage <= 0)
         {
@@ -280,9 +512,15 @@ internal static class EnemyTracker
             return;
         }
 
+        // A puppet only shows the hit; the host applies the damage and decides about death
+        if (tracked.Mirror.IsPuppet && hm.hp <= 0)
+        {
+            hm.hp = 1;
+        }
+
         tracked.SeenAlive = true;
         Log.Debug($"Local damage {damage} to {hm.name} ({tracked.Id}), hp now {hm.hp}");
-        Client.SendDamage(tracked.Id, damage);
+        Client.SendDamage(tracked.Id, damage, direction, (byte) attackType);
     }
 
     internal static void OnLocalDeath(HealthManager hm)
@@ -315,8 +553,10 @@ internal static class EnemyTracker
     }
 
     /// <summary>
-    /// Called every frame: applies deaths that were waiting for an inactive enemy to activate, and
-    /// catches deaths that did not go through HealthManager.Die.
+    /// Called every frame: moves puppets, streams the state of enemies we own, hands enemies over to
+    /// closer players, applies deaths that
+    /// were waiting for an inactive enemy to activate, and catches deaths that did not go through
+    /// HealthManager.Die.
     /// </summary>
     internal static void Update()
     {
@@ -325,12 +565,46 @@ internal static class EnemyTracker
             return;
         }
 
+        var now = Time.unscaledTime;
+        var sendState = _ownershipKnown && Config.SyncMovement && now >= _nextStateSendTime;
+        if (sendState)
+        {
+            _nextStateSendTime = now + 1f / Mathf.Max(1, Config.StateSendRate);
+        }
+
         UpdateBuffer.Clear();
         UpdateBuffer.AddRange(ByHm.Values);
         foreach (var tracked in UpdateBuffer)
         {
             var hm = tracked.Hm;
-            if (hm == null || !hm.gameObject.activeInHierarchy)
+            if (hm == null)
+            {
+                continue;
+            }
+
+            if (tracked.Mirror.IsPuppet)
+            {
+                if (now - tracked.LastStateTime > PuppetTimeout)
+                {
+                    // Nobody is streaming this enemy any more: let it run its own AI again
+                    Log.Debug($"No state for {hm.name} ({tracked.Id}) for {PuppetTimeout}s, resuming its own AI");
+                    tracked.Mirror.Unpuppetize();
+                }
+                else
+                {
+                    tracked.Mirror.Tick(Time.deltaTime);
+                }
+            }
+
+            if (sendState && tracked.Owned && !tracked.KnownDead && !hm.isDead &&
+                tracked.Mirror.TryCapture(tracked.Id, now, StateHeartbeat, out var state))
+            {
+                Client.SendState(state);
+            }
+
+            CheckZeroHpDeath(tracked, now);
+
+            if (!hm.gameObject.activeInHierarchy)
             {
                 continue;
             }
@@ -350,25 +624,67 @@ internal static class EnemyTracker
                 tracked.SeenAlive = true;
             }
         }
+
+        CheckHandovers(now);
+    }
+
+    /// <summary>
+    /// Report a death for enemies that are at 0 HP without isDead (see <see cref="ZeroHpDeathDelay"/>):
+    /// after the delay, or right away if the enemy is deactivated while at 0 HP.
+    /// Puppets are skipped: their HP comes from the host and never drops to 0.
+    /// </summary>
+    private static void CheckZeroHpDeath(TrackedEnemy tracked, float now)
+    {
+        var hm = tracked.Hm;
+        if (tracked.KnownDead || tracked.Mirror.IsPuppet || !tracked.SeenAlive || hm.isDead || hm.hp > 0)
+        {
+            tracked.ZeroHpSince = -1f;
+            return;
+        }
+
+        if (tracked.ZeroHpSince < 0f)
+        {
+            tracked.ZeroHpSince = now;
+            return;
+        }
+
+        if (now - tracked.ZeroHpSince >= ZeroHpDeathDelay || !hm.gameObject.activeInHierarchy)
+        {
+            Log.Debug($"{hm.name} ({tracked.Id}) stayed at 0 HP without isDead, treating it as dead");
+            SendDeathIfNew(tracked);
+        }
     }
 
     // ------------------------------------------------------------------ remote events (from packets)
 
-    internal static void OnRemoteDamage(uint id, int damage)
+    internal static void OnRemoteDamage(EnemyDamagePacket packet)
     {
-        if (!Active || !Config.SyncHealth || damage <= 0)
+        if (!Active || !Config.SyncHealth || packet.Damage <= 0)
         {
             return;
         }
 
-        var tracked = Find(id);
+        var tracked = Find(packet.EnemyId, logUnknown: true);
         if (tracked == null)
         {
-            GetPending(id).Damage += damage;
+            GetPending(packet.EnemyId).Damage += packet.Damage;
             return;
         }
 
-        ApplyDamage(tracked, damage);
+        if (tracked.Mirror.IsPuppet)
+        {
+            // The owner applies it; its HP reaches us in the state stream
+            return;
+        }
+
+        if (tracked.Owned && Config.SyncMovement)
+        {
+            ApplyDamageAsHost(tracked, packet);
+        }
+        else
+        {
+            ApplyDamageClamped(tracked, packet.Damage);
+        }
     }
 
     internal static void OnRemoteDeath(uint id)
@@ -378,7 +694,7 @@ internal static class EnemyTracker
             return;
         }
 
-        var tracked = Find(id);
+        var tracked = Find(id, logUnknown: true);
         if (tracked == null)
         {
             GetPending(id).Dead = true;
@@ -388,7 +704,7 @@ internal static class EnemyTracker
         ApplyDeath(tracked);
     }
 
-    private static TrackedEnemy? Find(uint id)
+    private static TrackedEnemy? Find(uint id, bool logUnknown)
     {
         if (ById.TryGetValue(id, out var tracked))
         {
@@ -401,7 +717,11 @@ internal static class EnemyTracker
             return tracked;
         }
 
-        Log.Debug($"Update for unknown enemy {id}, keeping it until the enemy shows up");
+        if (logUnknown)
+        {
+            Log.Debug($"Update for unknown enemy {id}, keeping it until the enemy shows up");
+        }
+
         return null;
     }
 
@@ -416,7 +736,11 @@ internal static class EnemyTracker
         return pending;
     }
 
-    private static void ApplyDamage(TrackedEnemy tracked, int damage)
+    /// <summary>
+    /// Damage without a hit reaction, never below 1 HP: the player who landed the killing blow
+    /// sends a death packet right after, which plays the proper death.
+    /// </summary>
+    private static void ApplyDamageClamped(TrackedEnemy tracked, int damage)
     {
         var hm = tracked.Hm;
         if (tracked.KnownDead || hm == null || hm.isDead)
@@ -424,10 +748,79 @@ internal static class EnemyTracker
             return;
         }
 
-        // Never kill from a damage packet: the player who landed the killing blow sends a death
-        // packet right after, which plays the proper death.
         hm.hp = Math.Max(1, hm.hp - damage);
         Log.Debug($"Remote damage {damage} to {hm.name} ({tracked.Id}), hp now {hm.hp}");
+    }
+
+    /// <summary>
+    /// As the enemy's owner, another player's hit is played as a real hit on our enemy, so it flinches,
+    /// staggers and dies like it would from our own attack. The puppets then see that reaction.
+    /// The HP is corrected afterwards so exactly the attacker's damage is taken.
+    /// </summary>
+    private static void ApplyDamageAsHost(TrackedEnemy tracked, EnemyDamagePacket packet)
+    {
+        var hm = tracked.Hm;
+        if (tracked.KnownDead || hm == null || hm.isDead)
+        {
+            return;
+        }
+
+        if (!hm.gameObject.activeInHierarchy)
+        {
+            ApplyDamageClamped(tracked, packet.Damage);
+            return;
+        }
+
+        var attackType = (AttackTypes) packet.AttackType;
+        var targetHp = hm.hp - packet.Damage;
+
+        ApplyingRemote = true;
+        try
+        {
+            var hero = HeroController.SilentInstance != null ? HeroController.SilentInstance.gameObject : null;
+            if (hero != null && !float.IsNaN(packet.Direction))
+            {
+                hm.Hit(new HitInstance
+                {
+                    Source = hero,
+                    AttackType = attackType,
+                    DamageDealt = packet.Damage,
+                    Direction = packet.Direction,
+                    Multiplier = 1f,
+                    MagnitudeMultiplier = 1f,
+                    SilkGeneration = HitSilkGeneration.None,
+                    IsFirstHit = true,
+                });
+            }
+
+            var hpAfterHit = hm.hp;
+            if (!hm.isDead)
+            {
+                hm.hp = targetHp;
+                // If the hit itself already took it to 0, its own death sequence has started
+                if (targetHp <= 0 && hpAfterHit > 0)
+                {
+                    hm.Die(float.IsNaN(packet.Direction) ? null : packet.Direction, attackType, true);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Error($"Failed to apply remote hit to {hm.name} ({tracked.Id}): {e}");
+        }
+        finally
+        {
+            ApplyingRemote = false;
+        }
+
+        tracked.SeenAlive = true;
+        Log.Debug($"Remote hit {packet.Damage} to {hm.name} ({tracked.Id}) as owner, hp now {hm.hp}");
+
+        // The patches stay quiet while ApplyingRemote, so report a kill by another player here
+        if (hm.isDead)
+        {
+            SendDeathIfNew(tracked);
+        }
     }
 
     private static void ApplyDeath(TrackedEnemy tracked)
@@ -449,6 +842,10 @@ internal static class EnemyTracker
         }
 
         tracked.PendingDeath = false;
+
+        // Give the enemy its FSMs back so its own death sequence can play
+        tracked.Mirror.Unpuppetize();
+
         ApplyingRemote = true;
         try
         {
