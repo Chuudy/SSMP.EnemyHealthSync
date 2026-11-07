@@ -1,7 +1,6 @@
-using UnityEngine;
+using System;
 using SSMP.Api.Server;
 using SSMP.Api.Server.Networking;
-using SSMP.Networking.Packet;
 using SSMPEnemyHealthSync.Networking;
 using SSMPEnemyHealthSync.Utils;
 
@@ -14,54 +13,51 @@ internal class Server : ServerAddon
     public override uint ApiVersion => Config.SSMPApiVersion;
     public override bool NeedsNetwork => true;
 
-    internal static IServerApi api = null!;
-    internal static Server instance = null!;
-    internal static IServerAddonNetworkSender<PacketId>? networkSender;
-    internal static IServerAddonNetworkReceiver<PacketId>? networkReceiver;
+    private static IServerAddonNetworkSender<PacketId>? _sender;
 
     public override void Initialize(IServerApi serverApi)
     {
-        instance = this;
-        api = serverApi;
+        _sender = serverApi.NetServer.GetNetworkSender<PacketId>(this);
+        var receiver = serverApi.NetServer.GetNetworkReceiver<PacketId>(this, Packets.Instantiate);
 
-        Debug.Log("[SSMP.EnemyHealthSync] Server addon initializing...");
+        receiver.RegisterPacketHandler<SceneEnteredPacket>(PacketId.SceneEntered, EnemyRelay.OnSceneEntered);
+        // Collections are unwrapped by SSMP: the handler is called once per instance.
+        receiver.RegisterPacketHandler<EnemyDamagePacket>(PacketId.EnemyDamage, EnemyRelay.OnDamage);
+        receiver.RegisterPacketHandler<EnemyDeathPacket>(PacketId.EnemyDeath, EnemyRelay.OnDeath);
 
-        // Get network sender and receiver from SSMP
-        try
-        {
-            networkSender = api.NetServer.GetNetworkSender<PacketId>(this);
-            Debug.Log($"[SSMP.EnemyHealthSync] Server network sender obtained: {networkSender != null}");
-        }
-        catch (System.Exception ex)
-        {
-            Debug.LogError($"[SSMP.EnemyHealthSync] Failed to get server network sender: {ex.Message}");
-        }
+        serverApi.ServerManager.PlayerDisconnectEvent += player => EnemyRelay.OnPlayerDisconnect(player.Id);
+        serverApi.ServerManager.ServerShutdownEvent += EnemyRelay.Clear;
 
-        try
-        {
-            networkReceiver = api.NetServer.GetNetworkReceiver<PacketId>(this, PacketInstantiator);
-            Debug.Log($"[SSMP.EnemyHealthSync] Server network receiver obtained: {networkReceiver != null}");
-        }
-        catch (System.Exception ex)
-        {
-            Debug.LogError($"[SSMP.EnemyHealthSync] Failed to get server network receiver: {ex.Message}");
-        }
-
-        PacketHandler.Init();
-
-        Logger.Info("SSMP EnemyHealthSync Server Initialized");
+        Log.Info("Server addon initialized");
     }
 
-    /// <summary>
-    /// Instantiate packet data based on packet ID
-    /// </summary>
-    private static IPacketData PacketInstantiator(PacketId packetId)
+    internal static void SendDamage(uint enemyId, int damage, ushort playerId)
     {
-        return packetId switch
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyDamage,
+            new EnemyDamagePacket { EnemyId = enemyId, Damage = damage }, playerId));
+    }
+
+    internal static void SendDeath(uint enemyId, ushort playerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyDeath,
+            new EnemyDeathPacket { EnemyId = enemyId }, playerId));
+    }
+
+    private static void Send(Action send)
+    {
+        if (_sender == null)
         {
-            PacketId.EnemyHealthUpdate => new EnemyHealthPacket(),
-            PacketId.SceneEntered => new SceneEnteredPacket(),
-            _ => throw new System.ArgumentOutOfRangeException(nameof(packetId), $"Unknown packet ID: {packetId}")
-        };
+            return;
+        }
+
+        try
+        {
+            send();
+        }
+        catch (Exception e)
+        {
+            // e.g. the player disconnected between lookup and send
+            Log.Debug($"Failed to send packet: {e.Message}");
+        }
     }
 }

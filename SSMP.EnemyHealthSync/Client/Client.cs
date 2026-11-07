@@ -1,9 +1,6 @@
-using System.Linq;
-using UnityEngine;
-using UnityEngine.SceneManagement;
+using System;
 using SSMP.Api.Client;
 using SSMP.Api.Client.Networking;
-using SSMP.Networking.Packet;
 using SSMPEnemyHealthSync.Networking;
 using SSMPEnemyHealthSync.Utils;
 
@@ -16,159 +13,62 @@ internal class Client : ClientAddon
     public override uint ApiVersion => Config.SSMPApiVersion;
     public override bool NeedsNetwork => true;
 
-    internal static IClientApi api = null!;
-    internal static Client instance = null!;
-    internal static IClientAddonNetworkSender<PacketId>? networkSender;
-    internal static IClientAddonNetworkReceiver<PacketId>? networkReceiver;
+    internal static IClientApi? Api { get; private set; }
+    private static IClientAddonNetworkSender<PacketId>? _sender;
 
-    /// <summary>
-    /// Whether we are the current scene host (responsible for syncing enemies)
-    /// </summary>
-    internal static bool IsSceneHost { get; private set; } = false;
-
-    /// <summary>
-    /// Whether scene host status has been determined for current scene
-    /// </summary>
-    internal static bool IsSceneHostDetermined { get; private set; } = false;
+    internal static bool IsConnected => Api?.NetClient?.IsConnected == true;
 
     public override void Initialize(IClientApi clientApi)
     {
-        instance = this;
-        api = clientApi;
+        Api = clientApi;
 
-        Debug.Log("[SSMP.EnemyHealthSync] Client addon initialized [v2-20250416]");
+        _sender = clientApi.NetClient.GetNetworkSender<PacketId>(this);
+        var receiver = clientApi.NetClient.GetNetworkReceiver<PacketId>(this, Packets.Instantiate);
 
-        // Get network sender and receiver from SSMP
+        // Collections are unwrapped by SSMP: the handler is called once per instance.
+        receiver.RegisterPacketHandler<EnemyDamagePacket>(PacketId.EnemyDamage,
+            p => EnemyTracker.OnRemoteDamage(p.EnemyId, p.Damage));
+        receiver.RegisterPacketHandler<EnemyDeathPacket>(PacketId.EnemyDeath,
+            p => EnemyTracker.OnRemoteDeath(p.EnemyId));
+
+        clientApi.ClientManager.ConnectEvent += EnemyTracker.OnConnected;
+        clientApi.ClientManager.DisconnectEvent += EnemyTracker.OnDisconnected;
+
+        EnemyTracker.Init();
+
+        Log.Info("Client addon initialized");
+    }
+
+    internal static void SendSceneEntered(string sceneName)
+    {
+        Send(() => _sender!.SendSingleData(PacketId.SceneEntered, new SceneEnteredPacket { SceneName = sceneName }));
+    }
+
+    internal static void SendDamage(uint enemyId, int damage)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyDamage,
+            new EnemyDamagePacket { EnemyId = enemyId, Damage = damage }));
+    }
+
+    internal static void SendDeath(uint enemyId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyDeath, new EnemyDeathPacket { EnemyId = enemyId }));
+    }
+
+    private static void Send(Action send)
+    {
+        if (_sender == null || !IsConnected)
+        {
+            return;
+        }
+
         try
         {
-            networkSender = api.NetClient.GetNetworkSender<PacketId>(this);
-            Debug.Log($"[SSMP.EnemyHealthSync] Network sender obtained: {networkSender != null}");
+            send();
         }
-        catch (System.Exception ex)
+        catch (Exception e)
         {
-            Debug.LogError($"[SSMP.EnemyHealthSync] Failed to get network sender: {ex.Message}");
+            Log.Error($"Failed to send packet: {e.Message}");
         }
-
-        try
-        {
-            networkReceiver = api.NetClient.GetNetworkReceiver<PacketId>(this, PacketInstantiator);
-            Debug.Log($"[SSMP.EnemyHealthSync] Network receiver obtained: {networkReceiver != null}");
-        }
-        catch (System.Exception ex)
-        {
-            Debug.LogError($"[SSMP.EnemyHealthSync] Failed to get network receiver: {ex.Message}");
-        }
-
-        // Initialize packet handling
-        PacketReceiver.Init();
-        PacketSender.Init();
-
-        // Initialize enemy sync system
-        EnemyHealthSyncManager.Init();
-
-        // Hook into scene events to track scene host status
-        api.ClientManager.PlayerEnterSceneEvent += OnPlayerEnterScene;
-        api.ClientManager.PlayerLeaveSceneEvent += OnPlayerLeaveScene;
-        // Use a coroutine to check if we're host after entering scene
-        // If we don't receive AlreadyInScene within 0.5 seconds, we are the host
-
-        Logger.Info("SSMP EnemyHealthSync Client Initialized");
-    }
-
-    /// <summary>
-    /// Called when any player enters our scene
-    /// </summary>
-    private void OnPlayerEnterScene(IClientPlayer player)
-    {
-        // Only process AlreadyInScene for players who were already in the scene when WE entered
-        // NOT for players who join after us (we should remain host in that case)
-        if (player.IsInLocalScene && !IsSceneHostDetermined)
-        {
-            // We just entered and found someone already here - we are NOT host
-            IsSceneHost = false;
-            IsSceneHostDetermined = true;
-            Debug.Log("[SSMP.EnemyHealthSync] We are NOT scene host (other player already in scene when we arrived)");
-        }
-        else if (player.IsInLocalScene && IsSceneHostDetermined && IsSceneHost)
-        {
-            EnemyHealthSyncManager.OnOtherPlayerEnteredLocalScene();
-        }
-        // If we ARE already determined as host, ignore host status changes - we stay host
-    }
-
-    /// <summary>
-    /// Called when any player leaves the scene
-    /// </summary>
-    private void OnPlayerLeaveScene(IClientPlayer player)
-    {
-        // Host migration not implemented - SSMP will handle reassigning host
-        // For now, if host leaves, no new updates will be sent until scene changes
-    }
-
-    /// <summary>
-    /// Called by EnemyHealthSyncManager when scene is loaded and enemies are scanned
-    /// </summary>
-    private static int _hostCheckFrameDelay = 0;
-    private const int HOST_CHECK_DELAY_FRAMES = 30; // ~0.5 seconds at 60fps
-
-    internal static void ResetSceneHost()
-    {
-        IsSceneHost = false;
-        IsSceneHostDetermined = false;
-        _hostCheckFrameDelay = 0; // Reset the frame delay counter
-        Debug.Log("[SSMP.EnemyHealthSync] Reset scene host status for new scene");
-    }
-
-    internal static void OnSceneLoadedAndEnemiesScanned()
-    {
-        if (IsSceneHostDetermined)
-        {
-            return;
-        }
-
-        if (api?.ClientManager?.Players == null)
-        {
-            Debug.Log("[SSMP.EnemyHealthSync] Delaying host check - API not ready yet");
-            return;
-        }
-
-        _hostCheckFrameDelay++;
-        if (_hostCheckFrameDelay < HOST_CHECK_DELAY_FRAMES)
-        {
-            return;
-        }
-
-        bool otherPlayersInScene = false;
-        foreach (var player in api.ClientManager.Players)
-        {
-            if (player.IsInLocalScene)
-            {
-                otherPlayersInScene = true;
-                break;
-            }
-        }
-
-        if (otherPlayersInScene)
-        {
-            IsSceneHost = false;
-            IsSceneHostDetermined = true;
-            Debug.Log("[SSMP.EnemyHealthSync] We are NOT scene host (other players already present)");
-        }
-        else
-        {
-            IsSceneHost = true;
-            IsSceneHostDetermined = true;
-            Debug.Log("[SSMP.EnemyHealthSync] We are scene host (first in scene)");
-        }
-    }
-
-    private static IPacketData PacketInstantiator(PacketId packetId)
-    {
-        return packetId switch
-        {
-            PacketId.EnemyHealthUpdate => new EnemyHealthPacket(),
-            PacketId.SceneEntered => new SceneEnteredPacket(),
-            _ => throw new System.ArgumentOutOfRangeException(nameof(packetId), packetId, null)
-        };
     }
 }
