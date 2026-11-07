@@ -46,6 +46,13 @@ internal sealed class EnemyMirror
     /// <summary>Puppet side: the owner's latest animation clip ID.</summary>
     private ushort _ownerClip = EnemyStatePacket.NoClip;
 
+    /// <summary>Puppet side: the owner's latest hitbox collider / contact damage bits.</summary>
+    private uint _ownerColliderEnabled;
+    private uint _ownerDamaging;
+
+    /// <summary>Each damager's damage as the enemy was loaded, to give back when it is 0.</summary>
+    private readonly Dictionary<DamageHero, int> _initialDamage = new();
+
     /// <summary>
     /// After taking over, the FSMs restart (which sets up their variables); on the next frame they
     /// jump to the owner's states. The frame to do that on, or negative when nothing is pending.
@@ -115,7 +122,12 @@ internal sealed class EnemyMirror
         {
             _hitboxObjects.Add(obj);
             _hitboxColliders.Add(obj.GetComponent<Collider2D>());
-            _hitboxDamagers.Add(obj.GetComponent<DamageHero>());
+            var damager = obj.GetComponent<DamageHero>();
+            _hitboxDamagers.Add(damager);
+            if (damager != null && damager.damageDealt > 0)
+            {
+                _initialDamage[damager] = damager.damageDealt;
+            }
         }
     }
 
@@ -293,6 +305,51 @@ internal sealed class EnemyMirror
         var restartClip = _animator != null ? _animator.CurrentClip : null;
         ResumeOwnerFsmStates();
         FixRestartClip(restartClip);
+        RestoreOwnerContact();
+    }
+
+    /// <summary>
+    /// The restart runs the FSMs' start state, which for sleeping enemies switches the body's
+    /// collider or contact damage off; jumping to the owner's state skips the wake-up step that
+    /// switches them back on, and the enemy would chase the player without being able to touch
+    /// them. Switch back on what the owner had on. Only switches things on, and only on objects
+    /// that are active, so attack hitboxes are never turned on outside their attack.
+    /// </summary>
+    private void RestoreOwnerContact()
+    {
+        for (var i = 0; i < _hitboxObjects.Count; i++)
+        {
+            var obj = _hitboxObjects[i];
+            if (obj == null || !obj.activeInHierarchy)
+            {
+                continue;
+            }
+
+            var col = _hitboxColliders[i];
+            if (col != null && !col.enabled && (_ownerColliderEnabled & (1u << i)) != 0)
+            {
+                col.enabled = true;
+                Utils.Log.Debug($"{_go.name}: re-enabled collider on '{obj.name}' after resuming");
+            }
+
+            var damager = _hitboxDamagers[i];
+            if (damager == null || (_ownerDamaging & (1u << i)) == 0)
+            {
+                continue;
+            }
+
+            if (!damager.enabled)
+            {
+                damager.enabled = true;
+                Utils.Log.Debug($"{_go.name}: re-enabled contact damage on '{obj.name}' after resuming");
+            }
+
+            if (damager.damageDealt <= 0)
+            {
+                damager.damageDealt = _initialDamage.TryGetValue(damager, out var initial) ? initial : 1;
+                Utils.Log.Debug($"{_go.name}: restored contact damage {damager.damageDealt} on '{obj.name}' after resuming");
+            }
+        }
     }
 
     /// <summary>
@@ -522,6 +579,8 @@ internal sealed class EnemyMirror
         PlayClip(state.Clip);
         _ownerFsmStates = state.FsmStates;
         _ownerClip = state.Clip;
+        _ownerColliderEnabled = state.HitboxColliderEnabled;
+        _ownerDamaging = state.HitboxDamaging;
 
         // Puppets never die on their own; the host's death packet does that
         _hm.hp = Math.Max(1, state.Hp);
@@ -572,7 +631,9 @@ internal sealed class EnemyMirror
 
             if (damager.damageDealt <= 0)
             {
-                damager.damageDealt = _savedDamage.TryGetValue(damager, out var saved) && saved > 0 ? saved : 1;
+                damager.damageDealt = _savedDamage.TryGetValue(damager, out var saved) && saved > 0 ? saved
+                    : _initialDamage.TryGetValue(damager, out var initial) ? initial
+                    : 1;
             }
         }
         else if (damager.damageDealt > 0)
