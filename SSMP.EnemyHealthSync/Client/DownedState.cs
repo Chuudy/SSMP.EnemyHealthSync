@@ -12,20 +12,29 @@ namespace SSMPEnemyHealthSync.Client;
 /// next to them. A downed player dies for real when they give up (hold Quick Map), bleed out, or
 /// when nobody in the room is left standing.
 ///
-/// The downed pose is the hero's "Sitting Asleep" clip, which SSMP already syncs to other players,
-/// so no extra visuals need networking. Downed states are shared through the server so other
-/// players know whom they can revive and enemies are never handed to a downed player.
+/// A downed player lies face down ("Prostrate"), flinches on every revive hit ("Taunt CollapseHit")
+/// and gets up with "Prostrate Rise". SSMP syncs all three hero clips to other players, so they need
+/// no extra networking. Downed states and revive progress are shared through the server so other
+/// players know whom they can revive, can see the progress (<see cref="ReviveIndicators"/>), and
+/// enemies are never handed to a downed player.
 /// </summary>
 internal static class DownedState
 {
-    private const string DownedClip = "Sitting Asleep";
+    /// <summary>Downed pose, best first; the first one the hero has is used.</summary>
+    private static readonly string[] DownedClipNames = ["Prostrate", "Sitting Asleep"];
+
+    private const string HitClipName = "Taunt CollapseHit";
+    private const string RiseClipName = "Prostrate Rise";
+
     private const float GiveUpHoldSeconds = 2f;
     private const float NoTeammateGraceSeconds = 2f;
     private const float ReviveGraceSeconds = 1.5f;
     private const float ReviveAttackCooldown = 0.25f;
+    private const float MaxHitFlinchSeconds = 0.8f;
+    private const float MaxRiseSeconds = 2f;
 
-    /// <summary>Downed players in our room, by SSMP player ID.</summary>
-    private static readonly HashSet<ushort> RemoteDowned = new();
+    /// <summary>Downed players in our room, by SSMP player ID, with their revive progress.</summary>
+    private static readonly Dictionary<ushort, (int Hits, int Needed)> RemoteDowned = new();
 
     private static bool _initialized;
 
@@ -39,12 +48,18 @@ internal static class DownedState
     private static float _graceUntil = -1f;
     private static float _lastReviveAttack = -999f;
 
+    /// <summary>Until when a revive-hit flinch plays instead of the downed pose.</summary>
+    private static float _poseLockUntil = -1f;
+
+    /// <summary>While positive: revived and playing the get-up animation, control comes back at this time.</summary>
+    private static float _risingUntil = -1f;
+
     /// <summary>Whether the local player is downed.</summary>
     internal static bool IsDowned { get; private set; }
 
     /// <summary>
     /// Whether the local player should take no damage: while downed, between the fatal hit and
-    /// going down, and for a moment after being revived.
+    /// going down, and for a moment after being revived (including the get-up animation).
     /// </summary>
     internal static bool BlocksDamage =>
         IsDowned || _pendingDown || Time.time < _graceUntil;
@@ -52,7 +67,7 @@ internal static class DownedState
     /// <summary>Downed or about to be: enemies should be handed to standing teammates.</summary>
     internal static bool IsDownedOrPending => IsDowned || _pendingDown;
 
-    internal static bool IsRemoteDowned(ushort playerId) => RemoteDowned.Contains(playerId);
+    internal static bool IsRemoteDowned(ushort playerId) => RemoteDowned.ContainsKey(playerId);
 
     internal static void Init()
     {
@@ -91,26 +106,29 @@ internal static class DownedState
 
     private static void EnterDowned(HeroController hero)
     {
+        if (_risingUntil > 0f)
+        {
+            FinishRise(hero);
+        }
+
         _pendingDown = false;
         IsDowned = true;
         _downedSince = Time.time;
         _reviveHits = 0;
         _giveUpHeldSince = -1f;
         _noTeammateSince = -1f;
+        _poseLockUntil = -1f;
 
         hero.RelinquishControl();
         hero.StopAnimationControl();
-        if (hero.animCtrl != null)
-        {
-            hero.animCtrl.PlayClip(DownedClip);
-        }
+        PlayClip(hero, Clips.Downed);
         if (hero.rb2d != null)
         {
             var velocity = hero.rb2d.linearVelocity;
             hero.rb2d.linearVelocity = new Vector2(0f, Mathf.Min(0f, velocity.y));
         }
 
-        Client.SendDowned(true);
+        Client.SendDowned(true, 0, Config.ReviveHits);
         Client.LocalChat(Config.BleedOutSeconds > 0f
             ? $"You are down! Teammates can revive you by attacking next to you. Hold Quick Map to give up " +
               $"(you bleed out in {Config.BleedOutSeconds:0} s)."
@@ -120,11 +138,18 @@ internal static class DownedState
 
     // ------------------------------------------------------------------ getting up / dying
 
-    /// <summary>Stand back up. With <paramref name="heal"/>, health is raised to ReviveHealth.</summary>
+    /// <summary>
+    /// Stand back up. With <paramref name="heal"/> (a real revive), health is raised to ReviveHealth
+    /// and the get-up animation plays before control comes back.
+    /// </summary>
     private static void Revive(bool heal)
     {
         var hero = HeroController.SilentInstance;
-        LeaveDowned(hero);
+        var riseSeconds = heal && hero != null && !hero.cState.dead && !hero.cState.transitioning
+            ? Mathf.Min(ClipSeconds(Clips.Rise), MaxRiseSeconds)
+            : 0f;
+
+        LeaveDowned(hero, giveControlBack: riseSeconds <= 0f);
 
         if (hero == null)
         {
@@ -140,18 +165,35 @@ internal static class DownedState
                 hero.AddHealth(missing);
             }
 
-            _graceUntil = Time.time + ReviveGraceSeconds;
+            if (riseSeconds > 0f)
+            {
+                PlayClip(hero, Clips.Rise);
+                _risingUntil = Time.time + riseSeconds;
+            }
+
+            _graceUntil = Time.time + riseSeconds + ReviveGraceSeconds;
             Client.LocalChat("You were revived!");
         }
 
         Log.Info($"Local player got back up (healed: {heal})");
     }
 
+    /// <summary>End the get-up animation and give control back.</summary>
+    private static void FinishRise(HeroController? hero)
+    {
+        _risingUntil = -1f;
+        if (hero != null && !hero.cState.dead)
+        {
+            hero.StartAnimationControl();
+            hero.RegainControl();
+        }
+    }
+
     /// <summary>Die for real (gave up, bled out, or nobody left standing).</summary>
     private static void DieForReal(string reason)
     {
         var hero = HeroController.SilentInstance;
-        LeaveDowned(hero);
+        LeaveDowned(hero, giveControlBack: true);
 
         if (hero == null || hero.cState.dead)
         {
@@ -167,20 +209,21 @@ internal static class DownedState
     }
 
     /// <summary>Common exit from the downed state: give control and animations back, tell the others.</summary>
-    private static void LeaveDowned(HeroController? hero)
+    private static void LeaveDowned(HeroController? hero, bool giveControlBack)
     {
         var wasDowned = IsDowned;
         IsDowned = false;
         _pendingDown = false;
         _giveUpHeldSince = -1f;
         _noTeammateSince = -1f;
+        _poseLockUntil = -1f;
 
         if (!wasDowned)
         {
             return;
         }
 
-        if (hero != null)
+        if (hero != null && giveControlBack)
         {
             hero.StartAnimationControl();
             hero.RegainControl();
@@ -193,7 +236,18 @@ internal static class DownedState
 
     internal static void Update()
     {
+        UpdateLocal();
+        UpdateIndicators();
+    }
+
+    private static void UpdateLocal()
+    {
         var hero = HeroController.SilentInstance;
+
+        if (_risingUntil > 0f)
+        {
+            UpdateRising(hero);
+        }
 
         if (_pendingDown)
         {
@@ -217,7 +271,7 @@ internal static class DownedState
 
         if (hero == null || hero.cState.dead)
         {
-            LeaveDowned(hero);
+            LeaveDowned(hero, giveControlBack: true);
             return;
         }
 
@@ -268,6 +322,27 @@ internal static class DownedState
         }
     }
 
+    /// <summary>Hold still while the get-up animation plays, then give control back.</summary>
+    private static void UpdateRising(HeroController? hero)
+    {
+        if (hero == null || hero.cState.dead || !Client.IsConnected || Time.time >= _risingUntil ||
+            hero.cState.hazardRespawning || hero.cState.transitioning)
+        {
+            FinishRise(hero);
+            return;
+        }
+
+        if (hero.acceptingInput)
+        {
+            hero.RelinquishControl();
+        }
+
+        if (hero.rb2d != null && Mathf.Abs(hero.rb2d.linearVelocity.x) > 0.01f)
+        {
+            hero.rb2d.linearVelocity = new Vector2(0f, hero.rb2d.linearVelocity.y);
+        }
+    }
+
     /// <summary>Things like a hazard respawn can give control or animations back; undo that while downed.</summary>
     private static void KeepDownedPose(HeroController hero)
     {
@@ -282,39 +357,21 @@ internal static class DownedState
             hero.RelinquishControl();
         }
 
-        var animCtrl = hero.animCtrl;
-        var animator = animCtrl != null ? animCtrl.GetComponent<tk2dSpriteAnimator>() : null;
-        if (animCtrl != null && animator != null && HasDownedClip(animator) &&
-            (animator.CurrentClip == null || animator.CurrentClip.name != DownedClip))
+        // A revive-hit flinch is playing; the downed pose comes back when it's over
+        if (Time.time >= _poseLockUntil && Clips.Downed != null)
         {
-            hero.StopAnimationControl();
-            animCtrl.PlayClip(DownedClip);
+            var animator = GetAnimator(hero);
+            if (animator != null && (animator.CurrentClip == null || animator.CurrentClip.name != Clips.Downed))
+            {
+                hero.StopAnimationControl();
+                PlayClip(hero, Clips.Downed);
+            }
         }
 
         if (hero.rb2d != null && Mathf.Abs(hero.rb2d.linearVelocity.x) > 0.01f)
         {
             hero.rb2d.linearVelocity = new Vector2(0f, hero.rb2d.linearVelocity.y);
         }
-    }
-
-    private static bool? _hasDownedClip;
-
-    /// <summary>
-    /// Whether the hero's animation library has the downed clip. Checked once, so a missing clip
-    /// doesn't make <see cref="KeepDownedPose"/> retry (and log) every frame.
-    /// </summary>
-    private static bool HasDownedClip(tk2dSpriteAnimator animator)
-    {
-        if (_hasDownedClip == null)
-        {
-            _hasDownedClip = animator.Library != null && animator.Library.GetClipByName(DownedClip) != null;
-            if (_hasDownedClip == false)
-            {
-                Log.Warn($"Hero animation '{DownedClip}' not found; downed players keep their current pose");
-            }
-        }
-
-        return _hasDownedClip.Value;
     }
 
     private static bool IsGiveUpHeld()
@@ -330,6 +387,130 @@ internal static class DownedState
         }
     }
 
+    /// <summary>Show revive progress above every downed player in the room, including ourselves.</summary>
+    private static void UpdateIndicators()
+    {
+        ReviveIndicators.BeginFrame();
+
+        if (IsDowned)
+        {
+            var hero = HeroController.SilentInstance;
+            if (hero != null)
+            {
+                ReviveIndicators.Show(ReviveIndicators.LocalKey, hero.transform, _reviveHits, Config.ReviveHits);
+            }
+        }
+
+        if (RemoteDowned.Count > 0)
+        {
+            var players = Client.Api?.ClientManager?.Players;
+            if (players != null)
+            {
+                foreach (var player in players)
+                {
+                    if (player.IsInLocalScene && player.PlayerObject != null &&
+                        RemoteDowned.TryGetValue(player.Id, out var progress))
+                    {
+                        var needed = progress.Needed > 0 ? progress.Needed : Config.ReviveHits;
+                        ReviveIndicators.Show(player.Id, player.PlayerObject.transform, progress.Hits, needed);
+                    }
+                }
+            }
+        }
+
+        ReviveIndicators.EndFrame();
+    }
+
+    // ------------------------------------------------------------------ hero animations
+
+    /// <summary>Hero clip names, resolved once against the hero's animation library (null = missing).</summary>
+    private static class Clips
+    {
+        private static bool _resolved;
+
+        internal static string? Downed { get; private set; }
+        internal static string? Hit { get; private set; }
+        internal static string? Rise { get; private set; }
+
+        internal static void Resolve(tk2dSpriteAnimator animator)
+        {
+            if (_resolved || animator.Library == null)
+            {
+                return;
+            }
+
+            _resolved = true;
+            var library = animator.Library;
+
+            foreach (var name in DownedClipNames)
+            {
+                if (library.GetClipByName(name) != null)
+                {
+                    Downed = name;
+                    break;
+                }
+            }
+
+            Hit = library.GetClipByName(HitClipName) != null ? HitClipName : null;
+            Rise = library.GetClipByName(RiseClipName) != null ? RiseClipName : null;
+
+            if (Downed == null)
+            {
+                Log.Warn("No downed hero animation found; downed players keep their current pose");
+            }
+            if (Hit == null || Rise == null)
+            {
+                Log.Warn($"Hero animation(s) not found:{(Hit == null ? " " + HitClipName : "")}" +
+                         $"{(Rise == null ? " " + RiseClipName : "")}");
+            }
+
+            Log.Debug($"Downed clips: pose '{Downed}', hit '{Hit}', rise '{Rise}'");
+        }
+    }
+
+    private static tk2dSpriteAnimator? GetAnimator(HeroController hero)
+    {
+        var animCtrl = hero.animCtrl;
+        var animator = animCtrl != null ? animCtrl.GetComponent<tk2dSpriteAnimator>() : null;
+        if (animator != null)
+        {
+            Clips.Resolve(animator);
+        }
+
+        return animator;
+    }
+
+    private static void PlayClip(HeroController hero, string? clip)
+    {
+        // Resolves the clip names on first use
+        GetAnimator(hero);
+        if (clip == null || hero.animCtrl == null)
+        {
+            return;
+        }
+
+        hero.animCtrl.PlayClip(clip);
+    }
+
+    /// <summary>Length of one play-through of a hero clip, 0 if unknown.</summary>
+    private static float ClipSeconds(string? clip)
+    {
+        var hero = HeroController.SilentInstance;
+        var animator = hero != null ? GetAnimator(hero) : null;
+        if (clip == null || animator == null || animator.Library == null)
+        {
+            return 0f;
+        }
+
+        var data = animator.Library.GetClipByName(clip);
+        if (data == null || data.frames == null || data.fps <= 0f)
+        {
+            return 0f;
+        }
+
+        return data.frames.Length / data.fps;
+    }
+
     // ------------------------------------------------------------------ teammates
 
     /// <summary>Other players in our room that are not downed.</summary>
@@ -343,7 +524,7 @@ internal static class DownedState
 
         foreach (var player in players)
         {
-            if (player.IsInLocalScene && !RemoteDowned.Contains(player.Id))
+            if (player.IsInLocalScene && !RemoteDowned.ContainsKey(player.Id))
             {
                 return true;
             }
@@ -378,7 +559,7 @@ internal static class DownedState
         Vector2 heroPos = hero.transform.position;
         foreach (var player in players)
         {
-            if (!player.IsInLocalScene || !RemoteDowned.Contains(player.Id) || player.PlayerObject == null)
+            if (!player.IsInLocalScene || !RemoteDowned.ContainsKey(player.Id) || player.PlayerObject == null)
             {
                 continue;
             }
@@ -388,24 +569,35 @@ internal static class DownedState
                 _lastReviveAttack = now;
                 Log.Debug($"Revive hit on player {player.Id}");
                 Client.SendReviveHit(player.Id);
+
+                // Immediate feedback; the filled pip follows once the downed player confirms the hit
+                ReviveIndicators.Pulse(player.Id);
             }
         }
     }
 
     // ------------------------------------------------------------------ network events
 
-    internal static void OnRemoteDowned(ushort playerId, bool downed)
+    internal static void OnRemoteDowned(ushort playerId, bool downed, int reviveHits, int reviveHitsNeeded)
     {
-        var changed = downed ? RemoteDowned.Add(playerId) : RemoteDowned.Remove(playerId);
-        if (!changed)
+        var name = Client.Api?.ClientManager?.GetPlayer(playerId)?.Username ?? $"Player {playerId}";
+
+        if (downed)
         {
+            var isNew = !RemoteDowned.ContainsKey(playerId);
+            RemoteDowned[playerId] = (reviveHits, reviveHitsNeeded);
+            if (isNew)
+            {
+                Client.LocalChat($"{name} is down! Attack next to them to revive them.");
+            }
+
             return;
         }
 
-        var name = Client.Api?.ClientManager?.GetPlayer(playerId)?.Username ?? $"Player {playerId}";
-        Client.LocalChat(downed
-            ? $"{name} is down! Attack next to them to revive them."
-            : $"{name} is back up.");
+        if (RemoteDowned.Remove(playerId))
+        {
+            Client.LocalChat($"{name} is back up.");
+        }
     }
 
     internal static void OnReviveHit()
@@ -420,6 +612,23 @@ internal static class DownedState
         if (_reviveHits >= Config.ReviveHits)
         {
             Revive(heal: true);
+            return;
+        }
+
+        // Share the progress with the room and flinch, so the attacker sees the hit land
+        Client.SendDowned(true, _reviveHits, Config.ReviveHits);
+
+        var hero = HeroController.SilentInstance;
+        if (hero == null || hero.cState.hazardRespawning || hero.cState.transitioning)
+        {
+            return;
+        }
+
+        var flinch = Mathf.Min(ClipSeconds(Clips.Hit), MaxHitFlinchSeconds);
+        if (flinch > 0f)
+        {
+            PlayClip(hero, Clips.Hit);
+            _poseLockUntil = Time.time + flinch;
         }
     }
 
@@ -429,6 +638,12 @@ internal static class DownedState
     {
         // The server sends the downed players of the new room
         RemoteDowned.Clear();
+        ReviveIndicators.Clear();
+
+        if (_risingUntil > 0f)
+        {
+            FinishRise(HeroController.SilentInstance);
+        }
 
         if (IsDownedOrPending)
         {
@@ -440,6 +655,13 @@ internal static class DownedState
     internal static void OnDisconnected()
     {
         RemoteDowned.Clear();
+        ReviveIndicators.Clear();
+
+        if (_risingUntil > 0f)
+        {
+            FinishRise(HeroController.SilentInstance);
+        }
+
         if (IsDownedOrPending)
         {
             Revive(heal: false);

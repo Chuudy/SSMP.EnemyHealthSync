@@ -32,7 +32,7 @@ internal class Client : ClientAddon
         receiver.RegisterPacketHandler<EnemyStatePacket>(PacketId.EnemyState, EnemyTracker.OnRemoteState);
         receiver.RegisterPacketHandler<RoomOwnershipPacket>(PacketId.RoomOwnership, EnemyTracker.OnRoomOwnership);
         receiver.RegisterPacketHandler<PlayerDownedPacket>(PacketId.PlayerDowned,
-            p => DownedState.OnRemoteDowned(p.PlayerId, p.Downed));
+            p => DownedState.OnRemoteDowned(p.PlayerId, p.Downed, p.ReviveHits, p.ReviveHitsNeeded));
         receiver.RegisterPacketHandler<ReviveHitPacket>(PacketId.ReviveHit, _ => DownedState.OnReviveHit());
 
         clientApi.ClientManager.ConnectEvent += EnemyTracker.OnConnected;
@@ -76,9 +76,15 @@ internal class Client : ClientAddon
         Send(() => _sender!.SendCollectionData(PacketId.EnemyDeath, new EnemyDeathPacket { EnemyId = enemyId }));
     }
 
-    internal static void SendDowned(bool downed)
+    /// <summary>Tell the room the local player went down / got up, or how far their revive has come.</summary>
+    internal static void SendDowned(bool downed, int reviveHits = 0, int reviveHitsNeeded = 0)
     {
-        Send(() => _sender!.SendCollectionData(PacketId.PlayerDowned, new PlayerDownedPacket { Downed = downed }));
+        Send(() => _sender!.SendCollectionData(PacketId.PlayerDowned, new PlayerDownedPacket
+        {
+            Downed = downed,
+            ReviveHits = (byte) Math.Clamp(reviveHits, 0, 255),
+            ReviveHitsNeeded = (byte) Math.Clamp(reviveHitsNeeded, 0, 255)
+        }));
     }
 
     internal static void SendReviveHit(ushort targetPlayerId)

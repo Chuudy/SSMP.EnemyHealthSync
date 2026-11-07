@@ -196,7 +196,8 @@ public sealed class EnemyStatePacket : IPacketData
 /// <summary>
 /// A player went down (would have died, waits for a revive) or got back up / died for real.
 /// From client to server PlayerId is ignored (the sender is used); from server to client it is the
-/// player whose state changed.
+/// player whose state changed. While downed, the downed player re-sends it after every revive hit
+/// so everyone in the room can show the revive progress.
 /// </summary>
 public sealed class PlayerDownedPacket : IPacketData
 {
@@ -206,16 +207,26 @@ public sealed class PlayerDownedPacket : IPacketData
     public ushort PlayerId { get; set; }
     public bool Downed { get; set; }
 
+    /// <summary>Revive hits received so far.</summary>
+    public byte ReviveHits { get; set; }
+
+    /// <summary>Revive hits needed in total (the downed player's ReviveHits setting).</summary>
+    public byte ReviveHitsNeeded { get; set; }
+
     public void WriteData(IPacket packet)
     {
         packet.Write(PlayerId);
         packet.Write(Downed);
+        packet.Write(ReviveHits);
+        packet.Write(ReviveHitsNeeded);
     }
 
     public void ReadData(IPacket packet)
     {
         PlayerId = packet.ReadUShort();
         Downed = packet.ReadBool();
+        ReviveHits = packet.ReadByte();
+        ReviveHitsNeeded = packet.ReadByte();
     }
 }
 

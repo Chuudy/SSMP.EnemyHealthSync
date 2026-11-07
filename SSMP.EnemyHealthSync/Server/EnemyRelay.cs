@@ -35,8 +35,8 @@ internal static class EnemyRelay
     /// <summary>Enemies that died in each occupied scene.</summary>
     private static readonly Dictionary<string, HashSet<uint>> DeadByScene = new(StringComparer.Ordinal);
 
-    /// <summary>Players that are downed (waiting for a revive).</summary>
-    private static readonly HashSet<ushort> Downed = new();
+    /// <summary>Players that are downed (waiting for a revive), with their revive progress.</summary>
+    private static readonly Dictionary<ushort, (byte Hits, byte Needed)> Downed = new();
 
     private readonly struct OwnershipMessage
     {
@@ -54,7 +54,7 @@ internal static class EnemyRelay
     {
         var scene = packet.SceneName ?? "";
         uint[] deadSnapshot = [];
-        ushort[] downedInRoom = [];
+        (ushort Id, byte Hits, byte Needed)[] downedInRoom = [];
         var messages = new List<OwnershipMessage>();
         ushort[] notifyStoodUp;
 
@@ -86,7 +86,10 @@ internal static class EnemyRelay
                     deadSnapshot = dead.ToArray();
                 }
 
-                downedInRoom = players.Where(p => p != playerId && Downed.Contains(p)).ToArray();
+                downedInRoom = players
+                    .Where(p => p != playerId && Downed.ContainsKey(p))
+                    .Select(p => (p, Downed[p].Hits, Downed[p].Needed))
+                    .ToArray();
             }
 
             ForgetEmptyScenes();
@@ -96,7 +99,7 @@ internal static class EnemyRelay
 
         foreach (var target in notifyStoodUp)
         {
-            Server.SendDowned(playerId, false, target);
+            Server.SendDowned(playerId, false, 0, 0, target);
         }
 
         if (scene.Length == 0)
@@ -105,9 +108,9 @@ internal static class EnemyRelay
         }
 
         // Teammates already downed here can be revived by the newcomer
-        foreach (var downedId in downedInRoom)
+        foreach (var (downedId, hits, needed) in downedInRoom)
         {
-            Server.SendDowned(downedId, true, playerId);
+            Server.SendDowned(downedId, true, hits, needed, playerId);
         }
 
         Log.Debug($"Player {playerId} entered '{scene}', sending {deadSnapshot.Length} dead enemies");
@@ -229,9 +232,21 @@ internal static class EnemyRelay
     internal static void OnDowned(ushort playerId, PlayerDownedPacket packet)
     {
         ushort[] targets;
+        var progress = (packet.ReviveHits, packet.ReviveHitsNeeded);
         lock (Lock)
         {
-            var changed = packet.Downed ? Downed.Add(playerId) : Downed.Remove(playerId);
+            bool changed;
+            if (packet.Downed)
+            {
+                // A downed player re-sends this after each revive hit to share the progress
+                changed = !Downed.TryGetValue(playerId, out var old) || old != progress;
+                Downed[playerId] = progress;
+            }
+            else
+            {
+                changed = Downed.Remove(playerId);
+            }
+
             if (!changed)
             {
                 return;
@@ -240,10 +255,12 @@ internal static class EnemyRelay
             targets = GetOthersInScene(playerId, out _);
         }
 
-        Log.Debug($"Player {playerId} is {(packet.Downed ? "down" : "back up")}");
+        Log.Debug(packet.Downed
+            ? $"Player {playerId} is down (revive {progress.ReviveHits}/{progress.ReviveHitsNeeded})"
+            : $"Player {playerId} is back up");
         foreach (var target in targets)
         {
-            Server.SendDowned(playerId, packet.Downed, target);
+            Server.SendDowned(playerId, packet.Downed, progress.ReviveHits, progress.ReviveHitsNeeded, target);
         }
     }
 
@@ -253,8 +270,8 @@ internal static class EnemyRelay
         {
             // Only a standing player in the same room can revive a downed one
             if (packet.TargetPlayerId == playerId ||
-                Downed.Contains(playerId) ||
-                !Downed.Contains(packet.TargetPlayerId) ||
+                Downed.ContainsKey(playerId) ||
+                !Downed.ContainsKey(packet.TargetPlayerId) ||
                 !PlayerScene.TryGetValue(playerId, out var scene) ||
                 !PlayerScene.TryGetValue(packet.TargetPlayerId, out var targetScene) ||
                 scene != targetScene)
@@ -296,7 +313,7 @@ internal static class EnemyRelay
 
         foreach (var target in notifyStoodUp)
         {
-            Server.SendDowned(playerId, false, target);
+            Server.SendDowned(playerId, false, 0, 0, target);
         }
     }
 

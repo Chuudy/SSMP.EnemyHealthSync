@@ -30,8 +30,9 @@ The SSMP server does not run the game, so it can't run enemies itself. Instead, 
 
 When a hit would kill you while a teammate in the same room is still standing, you go **down** instead of dying:
 
-- You collapse with 1 HP and can't move or act. Enemy hits can't hurt you, and enemies leave you alone and go after your teammates.
-- A teammate **revives** you by attacking while standing next to you. After `ReviveHits` swings (3 by default) you get back up with `ReviveHealth` masks (3 by default) and a moment of protection.
+- You collapse face down with 1 HP and can't move or act. Enemy hits can't hurt you, and enemies leave you alone and go after your teammates.
+- A row of pips above a downed player shows how many hits their revive still needs.
+- A teammate **revives** you by attacking while standing next to you. Each counted hit fills a pip and makes you flinch. After `ReviveHits` swings (3 by default) you get back up with `ReviveHealth` masks (3 by default) and a moment of protection.
 - **Hold Quick Map** for 2 seconds to give up and die normally.
 - If nobody revives you within `BleedOutSeconds` (30 by default), you bleed out and die.
 - If **nobody in the room is left standing**, everyone who is down dies.
@@ -87,7 +88,7 @@ DebugLogging = false  # Log every damage/death packet and ownership change
 4. Another player's enemy becomes a puppet when its first snapshot arrives. Its PlayMaker FSMs and AI scripts are disabled, its rigidbody becomes kinematic, and it glides toward the owner's position and plays the owner's animation. If snapshots stop for 2 seconds, it gets its own AI back.
 5. Four times per second, each owner checks its enemies: if another player in the room is within `HandoverRange` and at least 4 units closer than the owner (8 for bosses), and the owner has had the enemy for at least 2 seconds (8 for bosses), it hands the enemy over. Only the current owner can hand an enemy over, so two players never claim the same one.
 6. Harmony patches on `HealthManager.TakeDamage` / `ApplyExtraDamage` measure how much health each local hit removed and send that amount with the hit direction. The owner plays it as a real `Hit` and then corrects HP to exactly that amount. Puppets show the hit flash but never lose their last HP or die on their own; deaths come from the owner.
-7. Going down: a patch on `PlayerData.TakeHealth` reduces a fatal hit so it leaves exactly 1 HP, and the player then lies down in the hero's "Sitting Asleep" pose, which SSMP already shows to other players. While down, `HeroController.TakeDamage` ignores enemy hits. The server tracks who is down, tells players entering the room, and only passes on revive hits from a standing player in the same room. A downed player immediately hands all of their enemies to the nearest standing teammate, and nobody hands enemies to a downed player.
+7. Going down: a patch on `PlayerData.TakeHealth` reduces a fatal hit so it leaves exactly 1 HP, and the player then lies face down ("Prostrate"), flinches on revive hits ("Taunt CollapseHit") and gets up with "Prostrate Rise". SSMP already shows these hero animations to other players. The downed player shares their revive progress through the server, and every client draws it as pips above them. While down, `HeroController.TakeDamage` ignores enemy hits. The server tracks who is down, tells players entering the room, and only passes on revive hits from a standing player in the same room. A downed player immediately hands all of their enemies to the nearest standing teammate, and nobody hands enemies to a downed player.
 
 ### Limitations
 

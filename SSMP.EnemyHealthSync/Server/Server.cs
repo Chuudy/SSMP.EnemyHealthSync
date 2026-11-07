@@ -57,11 +57,21 @@ internal class Server : ServerAddon
             new EnemyDeathPacket { EnemyId = enemyId }, playerId));
     }
 
-    /// <summary>Tell <paramref name="toPlayerId"/> that <paramref name="downedPlayerId"/> went down or got up.</summary>
-    internal static void SendDowned(ushort downedPlayerId, bool downed, ushort toPlayerId)
+    /// <summary>
+    /// Tell <paramref name="toPlayerId"/> that <paramref name="downedPlayerId"/> went down, got up,
+    /// or how far their revive has come.
+    /// </summary>
+    internal static void SendDowned(ushort downedPlayerId, bool downed, byte reviveHits, byte reviveHitsNeeded,
+        ushort toPlayerId)
     {
         Send(() => _sender!.SendCollectionData(PacketId.PlayerDowned,
-            new PlayerDownedPacket { PlayerId = downedPlayerId, Downed = downed }, toPlayerId));
+            new PlayerDownedPacket
+            {
+                PlayerId = downedPlayerId,
+                Downed = downed,
+                ReviveHits = reviveHits,
+                ReviveHitsNeeded = reviveHitsNeeded
+            }, toPlayerId));
     }
 
     internal static void SendReviveHit(ushort downedPlayerId)
