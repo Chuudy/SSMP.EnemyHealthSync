@@ -26,6 +26,8 @@ internal class Server : ServerAddon
         receiver.RegisterPacketHandler<EnemyDeathPacket>(PacketId.EnemyDeath, EnemyRelay.OnDeath);
         receiver.RegisterPacketHandler<EnemyStatePacket>(PacketId.EnemyState, EnemyRelay.OnState);
         receiver.RegisterPacketHandler<HandoverPacket>(PacketId.Handover, EnemyRelay.OnHandover);
+        receiver.RegisterPacketHandler<PlayerDownedPacket>(PacketId.PlayerDowned, EnemyRelay.OnDowned);
+        receiver.RegisterPacketHandler<ReviveHitPacket>(PacketId.ReviveHit, EnemyRelay.OnReviveHit);
 
         serverApi.ServerManager.PlayerDisconnectEvent += player => EnemyRelay.OnPlayerDisconnect(player.Id);
         serverApi.ServerManager.ServerShutdownEvent += EnemyRelay.Clear;
@@ -53,6 +55,19 @@ internal class Server : ServerAddon
     {
         Send(() => _sender!.SendCollectionData(PacketId.EnemyDeath,
             new EnemyDeathPacket { EnemyId = enemyId }, playerId));
+    }
+
+    /// <summary>Tell <paramref name="toPlayerId"/> that <paramref name="downedPlayerId"/> went down or got up.</summary>
+    internal static void SendDowned(ushort downedPlayerId, bool downed, ushort toPlayerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.PlayerDowned,
+            new PlayerDownedPacket { PlayerId = downedPlayerId, Downed = downed }, toPlayerId));
+    }
+
+    internal static void SendReviveHit(ushort downedPlayerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.ReviveHit,
+            new ReviveHitPacket { TargetPlayerId = downedPlayerId }, downedPlayerId));
     }
 
     private static void Send(Action send)

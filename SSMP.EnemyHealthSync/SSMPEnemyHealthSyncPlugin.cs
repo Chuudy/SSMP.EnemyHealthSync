@@ -24,6 +24,7 @@ public partial class SSMPEnemyHealthSyncPlugin : BaseUnityPlugin
 
     private void Update()
     {
+        Client.DownedState.Update();
         Client.EnemyTracker.Update();
     }
 }

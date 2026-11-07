@@ -31,11 +31,18 @@ internal class Client : ClientAddon
             p => EnemyTracker.OnRemoteDeath(p.EnemyId));
         receiver.RegisterPacketHandler<EnemyStatePacket>(PacketId.EnemyState, EnemyTracker.OnRemoteState);
         receiver.RegisterPacketHandler<RoomOwnershipPacket>(PacketId.RoomOwnership, EnemyTracker.OnRoomOwnership);
+        receiver.RegisterPacketHandler<PlayerDownedPacket>(PacketId.PlayerDowned,
+            p => DownedState.OnRemoteDowned(p.PlayerId, p.Downed));
+        receiver.RegisterPacketHandler<ReviveHitPacket>(PacketId.ReviveHit, _ => DownedState.OnReviveHit());
 
         clientApi.ClientManager.ConnectEvent += EnemyTracker.OnConnected;
         clientApi.ClientManager.DisconnectEvent += EnemyTracker.OnDisconnected;
+        clientApi.ClientManager.DisconnectEvent += DownedState.OnDisconnected;
+        clientApi.ClientManager.PlayerLeaveSceneEvent += p => DownedState.OnPlayerLeft(p.Id);
+        clientApi.ClientManager.PlayerDisconnectEvent += p => DownedState.OnPlayerLeft(p.Id);
 
         EnemyTracker.Init();
+        DownedState.Init();
 
         Log.Info("Client addon initialized");
     }
@@ -67,6 +74,30 @@ internal class Client : ClientAddon
     internal static void SendDeath(uint enemyId)
     {
         Send(() => _sender!.SendCollectionData(PacketId.EnemyDeath, new EnemyDeathPacket { EnemyId = enemyId }));
+    }
+
+    internal static void SendDowned(bool downed)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.PlayerDowned, new PlayerDownedPacket { Downed = downed }));
+    }
+
+    internal static void SendReviveHit(ushort targetPlayerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.ReviveHit,
+            new ReviveHitPacket { TargetPlayerId = targetPlayerId }));
+    }
+
+    /// <summary>Show a message in the local chat box only.</summary>
+    internal static void LocalChat(string message)
+    {
+        try
+        {
+            Api?.UiManager?.ChatBox?.AddMessage(message);
+        }
+        catch (Exception e)
+        {
+            Log.Debug($"Could not show chat message: {e.Message}");
+        }
     }
 
     private static void Send(Action send)

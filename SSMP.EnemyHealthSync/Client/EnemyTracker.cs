@@ -424,7 +424,10 @@ internal static class EnemyTracker
     /// </summary>
     private static void CheckHandovers(float now)
     {
-        if (!Config.Handover || !Config.SyncMovement || !_ownershipKnown || now < _nextHandoverCheckTime)
+        // While we are downed our enemies would only stand over us, so hand every one of them to a
+        // standing teammate, even with Handover off (otherwise a downed room host freezes the room).
+        var downed = DownedState.IsDownedOrPending;
+        if ((!Config.Handover && !downed) || !Config.SyncMovement || !_ownershipKnown || now < _nextHandoverCheckTime)
         {
             return;
         }
@@ -441,7 +444,8 @@ internal static class EnemyTracker
         NearbyPlayers.Clear();
         foreach (var player in players)
         {
-            if (player.IsInLocalScene && player.PlayerObject != null)
+            // Never hand an enemy to a downed player
+            if (player.IsInLocalScene && player.PlayerObject != null && !DownedState.IsRemoteDowned(player.Id))
             {
                 NearbyPlayers.Add((player.Id, player.PlayerObject.transform.position));
             }
@@ -453,19 +457,25 @@ internal static class EnemyTracker
         }
 
         Vector2 heroPos = hero.transform.position;
-        var range = Config.HandoverRange;
+        var range = downed ? float.MaxValue : Config.HandoverRange;
 
         foreach (var tracked in ByHm.Values)
         {
             var hm = tracked.Hm;
-            if (!tracked.Owned || tracked.KnownDead || !tracked.SeenAlive || hm == null || hm.isDead ||
-                !hm.gameObject.activeInHierarchy || now - tracked.LastHandoverSent < HandoverRetryInterval)
+            if (!tracked.Owned || tracked.KnownDead || hm == null || hm.isDead ||
+                now - tracked.LastHandoverSent < HandoverRetryInterval)
+            {
+                continue;
+            }
+
+            // Normally only hand over enemies that are actually fighting; when downed, hand over all
+            if (!downed && (!tracked.SeenAlive || !hm.gameObject.activeInHierarchy))
             {
                 continue;
             }
 
             var hold = tracked.IsBoss ? BossHandoverHold : HandoverHold;
-            if (now - tracked.OwnedSince < hold)
+            if (!downed && now - tracked.OwnedSince < hold)
             {
                 continue;
             }
@@ -486,7 +496,7 @@ internal static class EnemyTracker
             }
 
             var margin = tracked.IsBoss ? BossHandoverMargin : HandoverMargin;
-            if (bestDist > range || bestDist + margin >= myDist)
+            if (bestDist > range || (!downed && bestDist + margin >= myDist))
             {
                 continue;
             }

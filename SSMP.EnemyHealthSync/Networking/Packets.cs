@@ -193,6 +193,44 @@ public sealed class EnemyStatePacket : IPacketData
     }
 }
 
+/// <summary>
+/// A player went down (would have died, waits for a revive) or got back up / died for real.
+/// From client to server PlayerId is ignored (the sender is used); from server to client it is the
+/// player whose state changed.
+/// </summary>
+public sealed class PlayerDownedPacket : IPacketData
+{
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    public ushort PlayerId { get; set; }
+    public bool Downed { get; set; }
+
+    public void WriteData(IPacket packet)
+    {
+        packet.Write(PlayerId);
+        packet.Write(Downed);
+    }
+
+    public void ReadData(IPacket packet)
+    {
+        PlayerId = packet.ReadUShort();
+        Downed = packet.ReadBool();
+    }
+}
+
+/// <summary>A teammate hit a downed player to revive them. TargetPlayerId is the downed player.</summary>
+public sealed class ReviveHitPacket : IPacketData
+{
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    public ushort TargetPlayerId { get; set; }
+
+    public void WriteData(IPacket packet) => packet.Write(TargetPlayerId);
+    public void ReadData(IPacket packet) => TargetPlayerId = packet.ReadUShort();
+}
+
 internal static class Packets
 {
     /// <summary>Packet instantiator shared by the client and server receivers.</summary>
@@ -206,6 +244,8 @@ internal static class Packets
             PacketId.RoomOwnership => new RoomOwnershipPacket(),
             PacketId.EnemyState => new PacketDataCollection<EnemyStatePacket>(),
             PacketId.Handover => new PacketDataCollection<HandoverPacket>(),
+            PacketId.PlayerDowned => new PacketDataCollection<PlayerDownedPacket>(),
+            PacketId.ReviveHit => new PacketDataCollection<ReviveHitPacket>(),
             _ => throw new System.ArgumentOutOfRangeException(nameof(packetId), packetId, null)
         };
     }

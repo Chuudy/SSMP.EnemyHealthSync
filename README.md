@@ -23,7 +23,21 @@ The SSMP server does not run the game, so it can't run enemies itself. Instead, 
 - **No double hits**: SSMP plays other players' attacks in your game, and those can hit your copy of an enemy. The addon ignores those hits, because the real damage already arrives from that player.
 - **Late joiners**: if you enter a room where other players already killed enemies, those enemies die for you too.
 - **Normal respawns**: once everyone has left a room, its enemies respawn as usual.
+- **Downed and revive**: see below.
 - **Works with any enemy** that has a `HealthManager`, including modded ones. No enemy list needed.
+
+## Downed and revive
+
+When a hit would kill you while a teammate in the same room is still standing, you go **down** instead of dying:
+
+- You collapse with 1 HP and can't move or act. Enemy hits can't hurt you, and enemies leave you alone and go after your teammates.
+- A teammate **revives** you by attacking while standing next to you. After `ReviveHits` swings (3 by default) you get back up with `ReviveHealth` masks (3 by default) and a moment of protection.
+- **Hold Quick Map** for 2 seconds to give up and die normally.
+- If nobody revives you within `BleedOutSeconds` (30 by default), you bleed out and die.
+- If **nobody in the room is left standing**, everyone who is down dies.
+- Playing alone in a room, you die as usual. Environmental hazards (spikes, acid, pits) still move a downed player back to safe ground, without costing health.
+
+The chat tells everyone in the room who is down and who got back up.
 
 ## Requirements
 
@@ -54,6 +68,13 @@ Handover = true       # Hand enemies to the nearest player (false = room host ru
 HandoverRange = 15    # Only hand an enemy to a player within this distance of it
 BossHpThreshold = 300 # Enemies with this much HP (or a boss-style death) hand over more cautiously
 
+[Downed]
+Enabled = true        # Go down instead of dying while a teammate is standing in the room
+BleedOutSeconds = 30  # Seconds to wait for a revive before dying (0 = wait forever)
+ReviveHits = 3        # Attacks next to a downed player needed to revive them (1-20)
+ReviveHealth = 3      # Masks a revived player gets back up with (1-20)
+ReviveRange = 3       # How close you must be to a downed teammate for your attacks to count
+
 [Debug]
 DebugLogging = false  # Log every damage/death packet and ownership change
 ```
@@ -66,6 +87,7 @@ DebugLogging = false  # Log every damage/death packet and ownership change
 4. Another player's enemy becomes a puppet when its first snapshot arrives. Its PlayMaker FSMs and AI scripts are disabled, its rigidbody becomes kinematic, and it glides toward the owner's position and plays the owner's animation. If snapshots stop for 2 seconds, it gets its own AI back.
 5. Four times per second, each owner checks its enemies: if another player in the room is within `HandoverRange` and at least 4 units closer than the owner (8 for bosses), and the owner has had the enemy for at least 2 seconds (8 for bosses), it hands the enemy over. Only the current owner can hand an enemy over, so two players never claim the same one.
 6. Harmony patches on `HealthManager.TakeDamage` / `ApplyExtraDamage` measure how much health each local hit removed and send that amount with the hit direction. The owner plays it as a real `Hit` and then corrects HP to exactly that amount. Puppets show the hit flash but never lose their last HP or die on their own; deaths come from the owner.
+7. Going down: a patch on `PlayerData.TakeHealth` reduces a fatal hit so it leaves exactly 1 HP, and the player then lies down in the hero's "Sitting Asleep" pose, which SSMP already shows to other players. While down, `HeroController.TakeDamage` ignores enemy hits. The server tracks who is down, tells players entering the room, and only passes on revive hits from a standing player in the same room. A downed player immediately hands all of their enemies to the nearest standing teammate, and nobody hands enemies to a downed player.
 
 ### Limitations
 
@@ -75,6 +97,9 @@ DebugLogging = false  # Log every damage/death packet and ownership change
 - Enemies spawned during a fight (summons, arena waves created at runtime) are synced on a best-effort basis: if they spawn in a different order on different clients, their IDs may not match.
 - Enemies that start out dead from a player's own save data never send a death to others.
 - Which components count as "AI" on puppets is decided by a name-based allowlist in `EnemyMirror.KeepOnPuppet`; some enemies may need it tuned.
+- Going down only catches deaths from health running out. Instant deaths that skip the health system still kill you right away.
+- A teammate without this addon counts as standing, so you won't die from "nobody left standing" while they're in the room. They can't revive you, though, so you'll bleed out instead.
+- Reviving counts nail attacks (`HeroController.Attack`); other attack types may not count.
 
 ## Building
 

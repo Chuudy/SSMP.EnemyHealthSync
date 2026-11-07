@@ -35,6 +35,9 @@ internal static class EnemyRelay
     /// <summary>Enemies that died in each occupied scene.</summary>
     private static readonly Dictionary<string, HashSet<uint>> DeadByScene = new(StringComparer.Ordinal);
 
+    /// <summary>Players that are downed (waiting for a revive).</summary>
+    private static readonly HashSet<ushort> Downed = new();
+
     private readonly struct OwnershipMessage
     {
         internal readonly ushort PlayerId;
@@ -51,10 +54,15 @@ internal static class EnemyRelay
     {
         var scene = packet.SceneName ?? "";
         uint[] deadSnapshot = [];
+        ushort[] downedInRoom = [];
         var messages = new List<OwnershipMessage>();
+        ushort[] notifyStoodUp;
 
         lock (Lock)
         {
+            // Changing rooms ends being downed (the client clears it too)
+            notifyStoodUp = ClearDowned(playerId);
+
             var oldScene = RemoveFromRoom(playerId, out var oldRoomChanged);
             if (oldRoomChanged && oldScene != null)
             {
@@ -77,6 +85,8 @@ internal static class EnemyRelay
                 {
                     deadSnapshot = dead.ToArray();
                 }
+
+                downedInRoom = players.Where(p => p != playerId && Downed.Contains(p)).ToArray();
             }
 
             ForgetEmptyScenes();
@@ -84,9 +94,20 @@ internal static class EnemyRelay
 
         SendSnapshots(messages);
 
+        foreach (var target in notifyStoodUp)
+        {
+            Server.SendDowned(playerId, false, target);
+        }
+
         if (scene.Length == 0)
         {
             return;
+        }
+
+        // Teammates already downed here can be revived by the newcomer
+        foreach (var downedId in downedInRoom)
+        {
+            Server.SendDowned(downedId, true, playerId);
         }
 
         Log.Debug($"Player {playerId} entered '{scene}', sending {deadSnapshot.Length} dead enemies");
@@ -205,11 +226,63 @@ internal static class EnemyRelay
         }
     }
 
+    internal static void OnDowned(ushort playerId, PlayerDownedPacket packet)
+    {
+        ushort[] targets;
+        lock (Lock)
+        {
+            var changed = packet.Downed ? Downed.Add(playerId) : Downed.Remove(playerId);
+            if (!changed)
+            {
+                return;
+            }
+
+            targets = GetOthersInScene(playerId, out _);
+        }
+
+        Log.Debug($"Player {playerId} is {(packet.Downed ? "down" : "back up")}");
+        foreach (var target in targets)
+        {
+            Server.SendDowned(playerId, packet.Downed, target);
+        }
+    }
+
+    internal static void OnReviveHit(ushort playerId, ReviveHitPacket packet)
+    {
+        lock (Lock)
+        {
+            // Only a standing player in the same room can revive a downed one
+            if (packet.TargetPlayerId == playerId ||
+                Downed.Contains(playerId) ||
+                !Downed.Contains(packet.TargetPlayerId) ||
+                !PlayerScene.TryGetValue(playerId, out var scene) ||
+                !PlayerScene.TryGetValue(packet.TargetPlayerId, out var targetScene) ||
+                scene != targetScene)
+            {
+                return;
+            }
+        }
+
+        Server.SendReviveHit(packet.TargetPlayerId);
+    }
+
+    /// <summary>
+    /// Mark a player as no longer downed. Returns the other players of their room to notify (empty
+    /// if they were not downed). Must be called while holding <see cref="Lock"/>, before the player
+    /// is removed from the room.
+    /// </summary>
+    private static ushort[] ClearDowned(ushort playerId)
+    {
+        return Downed.Remove(playerId) ? GetOthersInScene(playerId, out _) : [];
+    }
+
     internal static void OnPlayerDisconnect(ushort playerId)
     {
         var messages = new List<OwnershipMessage>();
+        ushort[] notifyStoodUp;
         lock (Lock)
         {
+            notifyStoodUp = ClearDowned(playerId);
             var scene = RemoveFromRoom(playerId, out var changed);
             if (changed && scene != null)
             {
@@ -220,12 +293,18 @@ internal static class EnemyRelay
         }
 
         SendSnapshots(messages);
+
+        foreach (var target in notifyStoodUp)
+        {
+            Server.SendDowned(playerId, false, target);
+        }
     }
 
     internal static void Clear()
     {
         lock (Lock)
         {
+            Downed.Clear();
             PlayerScene.Clear();
             RoomPlayers.Clear();
             OwnerOverrides.Clear();

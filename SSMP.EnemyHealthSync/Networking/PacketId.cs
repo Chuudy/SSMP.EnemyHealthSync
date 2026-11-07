@@ -22,4 +22,10 @@ public enum PacketId : byte
 
     /// <summary>Client -> server: the owner of an enemy hands it over to another player (collection).</summary>
     Handover = 5,
+
+    /// <summary>Client -> server -> others in the room: a player went down or got back up (collection).</summary>
+    PlayerDowned = 6,
+
+    /// <summary>Client -> server -> downed player: a teammate hit the downed player to revive them (collection).</summary>
+    ReviveHit = 7,
 }
