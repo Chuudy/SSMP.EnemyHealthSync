@@ -58,6 +58,9 @@ internal static class EnemyTracker
         /// <summary>Since when a handover has been waiting for the enemy's attack to end, or -1.</summary>
         internal float AttackingSince = -1f;
 
+        /// <summary>Last time we recovered this enemy from walking in place.</summary>
+        internal float LastStuckFix = -999f;
+
         /// <summary>Last time a state packet arrived for this enemy (puppet side).</summary>
         internal float LastStateTime = -999f;
     }
@@ -97,6 +100,8 @@ internal static class EnemyTracker
     private const float HandoverRetryInterval = 1f;
     private const float HandoverHold = 5f;
     private const float MaxAttackHandoverWait = 3f;
+    private const float HandoverVerticalWeight = 2f;
+    private const float StuckFixInterval = 10f;
     private const float HandoverMargin = 4f;
     private const float BossHandoverHold = 8f;
     private const float BossHandoverMargin = 8f;
@@ -428,15 +433,17 @@ internal static class EnemyTracker
     /// </summary>
     private static void CheckHandovers(float now)
     {
-        // While we are downed our enemies would only stand over us, so hand every one of them to a
-        // standing teammate, even with Handover off (otherwise a downed room host freezes the room).
-        var downed = DownedState.IsDownedOrPending;
-        if ((!Config.Handover && !downed) || !Config.SyncMovement || !_ownershipKnown || now < _nextHandoverCheckTime)
+        if (!Config.SyncMovement || !_ownershipKnown || now < _nextHandoverCheckTime)
         {
             return;
         }
 
         _nextHandoverCheckTime = now + HandoverCheckInterval;
+
+        // While we are downed our enemies would only stand over us, so hand every one of them to a
+        // standing teammate, even with Handover off (otherwise a downed room host freezes the room).
+        var downed = DownedState.IsDownedOrPending;
+        var canHandover = Config.Handover || downed;
 
         var hero = HeroController.SilentInstance;
         var players = Client.Api?.ClientManager?.Players;
@@ -455,30 +462,56 @@ internal static class EnemyTracker
             }
         }
 
-        if (NearbyPlayers.Count == 0)
-        {
-            return;
-        }
-
         Vector2 heroPos = hero.transform.position;
         var range = downed ? float.MaxValue : Config.HandoverRange;
 
         foreach (var tracked in ByHm.Values)
         {
             var hm = tracked.Hm;
-            if (!tracked.Owned || tracked.KnownDead || hm == null || hm.isDead ||
-                now - tracked.LastHandoverSent < HandoverRetryInterval)
+            if (!tracked.Owned || tracked.KnownDead || hm == null || hm.isDead)
+            {
+                continue;
+            }
+
+            var active = tracked.SeenAlive && hm.gameObject.activeInHierarchy;
+            var hold = tracked.IsBoss ? BossHandoverHold : HandoverHold;
+
+            // An enemy walking in place: its movement didn't start up again (e.g. after a takeover).
+            // At most one recovery per StuckFixInterval, in case an enemy walks in place on purpose.
+            if (!downed && active && tracked.Mirror.CheckStuck(now) && now - tracked.LastStuckFix >= StuckFixInterval)
+            {
+                tracked.Mirror.ResetStuck(now);
+                tracked.LastStuckFix = now;
+                var (stuckTarget, stuckDist) = NearestPlayer(hm.transform.position);
+                if (!canHandover || NearbyPlayers.Count == 0 || stuckDist > range ||
+                    now - tracked.OwnedSince < hold || now - tracked.LastHandoverSent < HandoverRetryInterval)
+                {
+                    // Just got it (so handing it back would only bounce it), or nobody to give it
+                    // to: restart its AI here
+                    Log.Debug($"{hm.name} ({tracked.Id}) is stuck walking in place, restarting its AI");
+                    tracked.Mirror.RestartAi();
+                }
+                else
+                {
+                    tracked.LastHandoverSent = now;
+                    Log.Debug($"{hm.name} ({tracked.Id}) is stuck walking in place, handing it to player {stuckTarget}");
+                    Client.SendHandover(tracked.Id, stuckTarget);
+                }
+
+                continue;
+            }
+
+            if (!canHandover || NearbyPlayers.Count == 0 || now - tracked.LastHandoverSent < HandoverRetryInterval)
             {
                 continue;
             }
 
             // Normally only hand over enemies that are actually fighting; when downed, hand over all
-            if (!downed && (!tracked.SeenAlive || !hm.gameObject.activeInHierarchy))
+            if (!downed && !active)
             {
                 continue;
             }
 
-            var hold = tracked.IsBoss ? BossHandoverHold : HandoverHold;
             if (!downed && now - tracked.OwnedSince < hold)
             {
                 continue;
@@ -504,19 +537,8 @@ internal static class EnemyTracker
             }
 
             Vector2 enemyPos = hm.transform.position;
-            var myDist = Vector2.Distance(heroPos, enemyPos);
-
-            ushort bestId = 0;
-            var bestDist = float.MaxValue;
-            foreach (var (id, pos) in NearbyPlayers)
-            {
-                var dist = Vector2.Distance(pos, enemyPos);
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    bestId = id;
-                }
-            }
+            var myDist = HandoverDistance(heroPos, enemyPos);
+            var (bestId, bestDist) = NearestPlayer(enemyPos);
 
             var margin = tracked.IsBoss ? BossHandoverMargin : HandoverMargin;
             if (bestDist > range || (!downed && bestDist + margin >= myDist))
@@ -528,6 +550,35 @@ internal static class EnemyTracker
             Log.Debug($"Handing {hm.name} ({tracked.Id}) to player {bestId} ({bestDist:F1} vs our {myDist:F1})");
             Client.SendHandover(tracked.Id, bestId);
         }
+    }
+
+    /// <summary>The other player in <see cref="NearbyPlayers"/> nearest to a position, by <see cref="HandoverDistance"/>.</summary>
+    private static (ushort Id, float Distance) NearestPlayer(Vector2 enemyPos)
+    {
+        ushort bestId = 0;
+        var bestDist = float.MaxValue;
+        foreach (var (id, pos) in NearbyPlayers)
+        {
+            var dist = HandoverDistance(pos, enemyPos);
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                bestId = id;
+            }
+        }
+
+        return (bestId, bestDist);
+    }
+
+    /// <summary>
+    /// Distance for handovers, with vertical distance counting double: most enemies move along the
+    /// ground, so a player on a ledge above is harder to reach than one at the same height.
+    /// </summary>
+    private static float HandoverDistance(Vector2 a, Vector2 b)
+    {
+        var dx = a.x - b.x;
+        var dy = (a.y - b.y) * HandoverVerticalWeight;
+        return Mathf.Sqrt(dx * dx + dy * dy);
     }
 
     // ------------------------------------------------------------------ local events (from patches)

@@ -53,6 +53,20 @@ internal sealed class EnemyMirror
     /// <summary>Each damager's damage as the enemy was loaded, to give back when it is 0.</summary>
     private readonly Dictionary<DamageHero, int> _initialDamage = new();
 
+    // Puppet side: the owner's velocity, estimated from the positions in its snapshots. Movement
+    // scripts (Walker, ...) and FSM states often set the velocity only once when a walk starts; a
+    // puppet's is zeroed, so a new owner gives it back or the enemy walks in place.
+    private Vector2 _lastSnapshotPos;
+    private float _lastSnapshotTime = -1f;
+    private Vector2 _ownerVelocity;
+    private const float MaxVelocitySampleGap = 0.6f;
+
+    // Owner side: stuck detection (trying to move, but not moving)
+    private Vector2 _stuckRefPos;
+    private float _stuckSince = -1f;
+    private const float StuckMoveThreshold = 0.15f;
+    private const float StuckSeconds = 1.5f;
+
     /// <summary>
     /// After taking over, the FSMs restart (which sets up their variables); on the next frame they
     /// jump to the owner's states. The frame to do that on, or negative when nothing is pending.
@@ -89,6 +103,7 @@ internal sealed class EnemyMirror
 
         CollectHitboxes();
         _fsms = _go.GetComponentsInChildren<PlayMakerFSM>(true).Take(EnemyStatePacket.MaxFsms).ToArray();
+        _body = _go.GetComponent<Rigidbody2D>();
     }
 
     /// <summary>
@@ -306,6 +321,77 @@ internal sealed class EnemyMirror
         ResumeOwnerFsmStates();
         FixRestartClip(restartClip);
         RestoreOwnerContact();
+
+        // The restart or the resumed state may have stopped the body; carry on at the owner's speed
+        if (_body != null && _body.bodyType == RigidbodyType2D.Dynamic &&
+            _body.linearVelocity.sqrMagnitude < 0.0025f && _ownerVelocity.sqrMagnitude > 0.04f)
+        {
+            _body.linearVelocity = _ownerVelocity;
+            Utils.Log.Debug($"{_go.name}: gave back the owner's velocity {_ownerVelocity} after resuming");
+        }
+    }
+
+    /// <summary>
+    /// Owner side, called a few times per second: whether the enemy has been trying to move
+    /// (horizontal velocity or a walk/run animation) without actually moving for a while.
+    /// That happens when its movement didn't start up again after a takeover.
+    /// </summary>
+    internal bool CheckStuck(float now)
+    {
+        Vector2 pos = _go.transform.position;
+        var tryingToMove = !IsAttacking &&
+                           ((_body != null && Mathf.Abs(_body.linearVelocity.x) > 0.1f) || IsMoveClipPlaying());
+
+        if (!tryingToMove || _stuckSince < 0f || (pos - _stuckRefPos).sqrMagnitude > StuckMoveThreshold * StuckMoveThreshold)
+        {
+            ResetStuck(now);
+            return false;
+        }
+
+        return now - _stuckSince >= StuckSeconds;
+    }
+
+    internal void ResetStuck(float now)
+    {
+        _stuckRefPos = _go.transform.position;
+        _stuckSince = now;
+    }
+
+    private bool IsMoveClipPlaying()
+    {
+        var clip = _animator != null && _animator.Playing ? _animator.CurrentClip : null;
+        if (clip == null || string.IsNullOrEmpty(clip.name))
+        {
+            return false;
+        }
+
+        return clip.name.IndexOf("walk", StringComparison.OrdinalIgnoreCase) >= 0 ||
+               clip.name.IndexOf("run", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    /// <summary>
+    /// Owner side recovery for a stuck enemy: send its FSMs back to their start states, as if the
+    /// enemy had just been loaded, so they set up and start its movement again.
+    /// </summary>
+    internal void RestartAi()
+    {
+        foreach (var fsm in _fsms)
+        {
+            var start = fsm != null && fsm.enabled && fsm.Fsm != null ? fsm.Fsm.StartState : null;
+            if (string.IsNullOrEmpty(start))
+            {
+                continue;
+            }
+
+            try
+            {
+                fsm!.SetState(start);
+            }
+            catch (Exception e)
+            {
+                Utils.Log.Debug($"Could not restart {_go.name} FSM '{fsm!.FsmName}': {e.Message}");
+            }
+        }
     }
 
     /// <summary>
@@ -429,6 +515,9 @@ internal sealed class EnemyMirror
 
         IsPuppet = true;
         _resumeFsmFrame = -1;
+        _lastSnapshotTime = -1f;
+        _ownerVelocity = Vector2.zero;
+        _stuckSince = -1f;
         _disabledBehaviours.Clear();
         _savedDamage.Clear();
 
@@ -535,10 +624,18 @@ internal sealed class EnemyMirror
         _savedDamage.Clear();
 
         _resumeFsmFrame = resumeOwnerState && _ownerFsmStates.Length > 0 ? Time.frameCount + 1 : -1;
+        _stuckSince = -1f;
 
         if (_body != null)
         {
             _body.bodyType = _bodyType;
+
+            // Movement scripts that set the velocity once when a walk starts would otherwise keep
+            // walking at the puppet's zero velocity
+            if (resumeOwnerState && _body.bodyType == RigidbodyType2D.Dynamic)
+            {
+                _body.linearVelocity = _ownerVelocity;
+            }
         }
 
         if (_go != null)
@@ -563,6 +660,7 @@ internal sealed class EnemyMirror
         }
 
         _target = new Vector2(state.X, state.Y);
+        SampleOwnerVelocity(_target);
         if (!_hasTarget)
         {
             _hasTarget = true;
@@ -684,6 +782,33 @@ internal sealed class EnemyMirror
         {
             _body.linearVelocity = Vector2.zero;
         }
+    }
+
+    /// <summary>Estimate the owner's velocity from consecutive snapshot positions.</summary>
+    private void SampleOwnerVelocity(Vector2 pos)
+    {
+        var now = Time.unscaledTime;
+        if (_lastSnapshotTime >= 0f)
+        {
+            var dt = now - _lastSnapshotTime;
+            if (dt > MaxVelocitySampleGap)
+            {
+                // Unchanged enemies are only re-sent twice a second: a long gap means it stood still
+                _ownerVelocity = Vector2.zero;
+            }
+            else if (dt > 0.005f)
+            {
+                // Light smoothing against network jitter
+                _ownerVelocity = Vector2.Lerp(_ownerVelocity, (pos - _lastSnapshotPos) / dt, 0.6f);
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        _lastSnapshotPos = pos;
+        _lastSnapshotTime = now;
     }
 
     private void SnapToTarget()
