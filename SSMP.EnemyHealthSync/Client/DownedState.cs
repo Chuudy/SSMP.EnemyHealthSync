@@ -596,6 +596,10 @@ internal static class DownedState
             if (isNew)
             {
                 Client.LocalChat($"{name} is down! Attack next to them to revive them.");
+                if (Config.DownedPrompt)
+                {
+                    ScreenOverlay.ShowBanner($"{name} is down! Revive them!", new Color(1f, 0.3f, 0.25f), 1.5f);
+                }
             }
 
             return;
@@ -604,6 +608,10 @@ internal static class DownedState
         if (RemoteDowned.Remove(playerId))
         {
             Client.LocalChat($"{name} is back up.");
+            if (Config.DownedPrompt)
+            {
+                ScreenOverlay.ShowBanner($"{name} is back up", new Color(0.6f, 1f, 0.6f), 1.5f, large: false);
+            }
         }
     }
 

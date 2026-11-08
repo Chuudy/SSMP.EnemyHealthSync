@@ -5,7 +5,7 @@ namespace SSMPEnemyHealthSync.Utils;
 internal static class Config
 {
     public const string ModName = "SSMP.EnemyHealthSync";
-    public const string Version = "1.3.5";
+    public const string Version = "1.4.0";
     public const uint SSMPApiVersion = 1;
 
     private static ConfigEntry<bool>? _enabled;
@@ -21,6 +21,10 @@ internal static class Config
     private static ConfigEntry<int>? _reviveHits;
     private static ConfigEntry<int>? _reviveHealth;
     private static ConfigEntry<float>? _reviveRange;
+    private static ConfigEntry<bool>? _teleportBackDpad;
+    private static ConfigEntry<float>? _tripleTapWindow;
+    private static ConfigEntry<bool>? _downedPrompt;
+    private static ConfigEntry<bool>? _offscreenMarkers;
     private static ConfigEntry<bool>? _debugLogging;
 
     public static bool Enabled => _enabled?.Value ?? true;
@@ -36,6 +40,10 @@ internal static class Config
     public static int ReviveHits => _reviveHits?.Value ?? 3;
     public static int ReviveHealth => _reviveHealth?.Value ?? 3;
     public static float ReviveRange => _reviveRange?.Value ?? 3f;
+    public static bool TeleportBackDpad => Enabled && (_teleportBackDpad?.Value ?? true);
+    public static float TripleTapWindow => _tripleTapWindow?.Value ?? 0.4f;
+    public static bool DownedPrompt => Enabled && (_downedPrompt?.Value ?? true);
+    public static bool OffscreenMarkers => Enabled && (_offscreenMarkers?.Value ?? true);
     public static bool DebugLogging => _debugLogging?.Value ?? false;
 
     public static void Init(ConfigFile config)
@@ -72,7 +80,17 @@ internal static class Config
             new AcceptableValueRange<int>(1, 20)));
         _reviveRange = config.Bind("Downed", "ReviveRange", 3f,
             "How close you must be to a downed teammate for your attacks to count toward reviving them");
+        _teleportBackDpad = config.Bind("QualityOfLife", "TeleportBackDpad", true,
+            "Triple-tap D-pad Left to go back to the room you came from (e.g. to get out of a stuck boss arena)");
+        _tripleTapWindow = config.Bind("QualityOfLife", "TripleTapWindow", 0.4f, new ConfigDescription(
+            "Most seconds allowed between the taps of a triple tap",
+            new AcceptableValueRange<float>(0.1f, 1.5f)));
+        _downedPrompt = config.Bind("QualityOfLife", "DownedPrompt", true,
+            "Show a large message in the middle of the screen when a teammate goes down");
+        _offscreenMarkers = config.Bind("QualityOfLife", "OffscreenMarkers", true,
+            "Show arrows at the screen edge pointing to teammates in the same room who are off screen");
         _debugLogging = config.Bind("Debug", "DebugLogging", false,
-            "Log every enemy damage/death packet sent and received, and ownership changes");
+            "Log every enemy damage/death packet sent and received, ownership changes, and bell beast " +
+            "(Bellway) state changes");
     }
 }

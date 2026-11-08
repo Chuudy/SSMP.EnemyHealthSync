@@ -38,7 +38,13 @@ When a hit would kill you while a teammate in the same room is still standing, y
 - If **nobody in the room is left standing**, everyone who is down dies.
 - Playing alone in a room, you die as usual. Environmental hazards (spikes, acid, pits) still move a downed player back to safe ground, without costing health.
 
-The chat tells everyone in the room who is down and who got back up.
+The chat tells everyone in the room who is down and who got back up, and a large message near the top of the screen makes sure you notice.
+
+## Quality of life
+
+- **Go back a room**: triple-tap **D-pad Left** (quickly, within `TripleTapWindow` seconds between taps) to go back through the door you came in by. Handy when a boss arena locks you in. If you didn't come in through a door (bench, cutscene, travel), any door to the previous room is used. Doesn't work in menus, while chatting or while downed.
+- **Teammate down banner**: when a teammate goes down, "<Name> is down! Revive them!" appears near the top of the screen for a moment.
+- **Off-screen markers**: an arrow at the edge of the screen points to each teammate in the same room who is off screen, with their name. A downed teammate's arrow pulses red.
 
 ## Requirements
 
@@ -76,8 +82,14 @@ ReviveHits = 3        # Attacks next to a downed player needed to revive them (1
 ReviveHealth = 3      # Masks a revived player gets back up with (1-20)
 ReviveRange = 3       # How close you must be to a downed teammate for your attacks to count
 
+[QualityOfLife]
+TeleportBackDpad = true  # Triple-tap D-pad Left to go back to the previous room
+TripleTapWindow = 0.4    # Most seconds between taps of a triple tap (0.1-1.5)
+DownedPrompt = true      # Banner in the middle of the screen when a teammate goes down
+OffscreenMarkers = true  # Arrows at the screen edge pointing to off-screen teammates
+
 [Debug]
-DebugLogging = false  # Log every damage/death packet and ownership change
+DebugLogging = false  # Log every damage/death packet, ownership change and bell beast state change
 ```
 
 ## How it works
@@ -93,6 +105,7 @@ DebugLogging = false  # Log every damage/death packet and ownership change
 ### Limitations
 
 - Projectiles and other objects enemies spawn during an attack don't appear on puppets yet.
+- The bell beast (Bellway travel) isn't synced yet: each player calls and rides it on their own. Travelling together is planned; with `DebugLogging` on, the addon logs the Bellway's state changes (`[BellBeast]` lines) to help build it.
 - Room logic outside the enemies (arena gates, battle waves) still runs separately on each player's game.
 - When an enemy changes owner, the new owner's copy carries on from the previous owner's FSM states. FSM variables (timers, stored targets) and non-FSM AI scripts are not transferred, so it may briefly hitch or restart its current move. Bosses hand over less often to keep fights smooth.
 - Enemies spawned during a fight (summons, arena waves created at runtime) are synced on a best-effort basis: if they spawn in a different order on different clients, their IDs may not match.
