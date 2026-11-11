@@ -53,6 +53,10 @@ internal sealed class EnemyMirror
     /// <summary>Puppet side: whether the owner's body was kinematic in its latest snapshot, or null before one arrived.</summary>
     private bool? _ownerKinematic;
 
+    /// <summary>Puppet side: whether the owner's enemy was visible, and its sprite colour, in the latest snapshot.</summary>
+    private bool? _ownerVisible;
+    private uint? _ownerSpriteColor;
+
     /// <summary>Puppet side: a damager's damage before we set it to 0, to give it back when the owner's is on again.</summary>
     private readonly Dictionary<DamageHero, int> _savedDamage = new();
 
@@ -431,6 +435,7 @@ internal sealed class EnemyMirror
         ResumeOwnerFsmStates();
         FixRestartClip(restartClip);
         RestoreOwnerContact();
+        RestoreOwnerLook();
 
         // The restart or the resumed state may have stopped the body; carry on at the owner's speed
         if (_body != null && _body.bodyType == RigidbodyType2D.Dynamic &&
@@ -549,6 +554,38 @@ internal sealed class EnemyMirror
     }
 
     /// <summary>
+    /// The restart runs the FSMs' start states, which for arena and ambush enemies hide the enemy
+    /// (renderer off, sprite made transparent, "Dormant") until an entrance shows it. Jumping to
+    /// the owner's state skips that entrance, so the enemy would stay invisible for its new owner
+    /// and, through the snapshots, for everyone else. Show it the way the old owner did, and give
+    /// the body the old owner's type again in case a start state changed it.
+    /// </summary>
+    private void RestoreOwnerLook()
+    {
+        if (_renderer != null && _ownerVisible == true && !_renderer.enabled)
+        {
+            _renderer.enabled = true;
+            Utils.Log.Debug($"{_go.name}: shown again after resuming (the restart had hidden it)");
+        }
+
+        if (_sprite != null && _ownerSpriteColor.HasValue && PackColor(_sprite.color) != _ownerSpriteColor.Value)
+        {
+            _sprite.color = UnpackColor(_ownerSpriteColor.Value);
+            Utils.Log.Debug($"{_go.name}: restored the owner's sprite colour after resuming");
+        }
+
+        if (_body != null && _ownerKinematic.HasValue && _bodyType != RigidbodyType2D.Static)
+        {
+            var type = _ownerKinematic.Value ? RigidbodyType2D.Kinematic : RigidbodyType2D.Dynamic;
+            if (_body.bodyType != type)
+            {
+                _body.bodyType = type;
+                Utils.Log.Debug($"{_go.name}: restored the owner's body type {type} after resuming");
+            }
+        }
+    }
+
+    /// <summary>
     /// If the enemy still shows the animation its restart put on (e.g. asleep) after jumping to the
     /// owner's states, show the owner's animation instead. Some states don't play a clip of their
     /// own because the skipped wake-up state already did.
@@ -630,6 +667,8 @@ internal sealed class EnemyMirror
         _stuckSince = -1f;
         _visualsSynced = false;
         _ownerKinematic = null;
+        _ownerVisible = null;
+        _ownerSpriteColor = null;
         _disabledBehaviours.Clear();
         _savedDamage.Clear();
 
@@ -808,6 +847,9 @@ internal sealed class EnemyMirror
         {
             _ownerKinematic = state.Kinematic;
         }
+
+        _ownerVisible = state.Visible;
+        _ownerSpriteColor = state.SpriteColor;
 
         ApplyVisuals(state);
         _ownerFsmStates = state.FsmStates;
