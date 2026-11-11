@@ -63,6 +63,15 @@ internal static class EnemyTracker
 
         /// <summary>Last time a state packet arrived for this enemy (puppet side).</summary>
         internal float LastStateTime = -999f;
+
+        /// <summary>Scene the enemy belongs to, to tell a removed enemy from a room being unloaded.</summary>
+        internal string SceneName = "";
+
+        /// <summary>Owner side: when the enemy was first seen removed (destroyed without dying), or -1.</summary>
+        internal float GoneSince = -1f;
+
+        /// <summary>Removal already sent or applied.</summary>
+        internal bool DespawnHandled;
     }
 
     private sealed class PendingUpdate
@@ -295,6 +304,7 @@ internal static class EnemyTracker
             Hm = hm,
             Mirror = new EnemyMirror(hm),
             IsBoss = hm.hasSpecialDeath || hm.bigEnemyDeath || hm.initHp >= Config.BossHpThreshold,
+            SceneName = hm.gameObject.scene.name,
         };
         ByHm[hm] = tracked;
         ById[id] = tracked;
@@ -337,7 +347,7 @@ internal static class EnemyTracker
     /// times still agree. Enemies spawned during a fight are best effort: their path can differ
     /// between clients if they spawn in a different order.
     /// </summary>
-    private static uint ComputeId(Transform transform)
+    internal static uint ComputeId(Transform transform)
     {
         var hash = 2166136261u;
 
@@ -382,6 +392,17 @@ internal static class EnemyTracker
         }
 
         return hash;
+    }
+
+    /// <summary>For arena diagnostics: whether we run this enemy or follow another player's copy.</summary>
+    internal static string DescribeOwnership(HealthManager hm)
+    {
+        if (!ByHm.TryGetValue(hm, out var tracked))
+        {
+            return " untracked";
+        }
+
+        return tracked.Mirror.IsPuppet ? " puppet" : tracked.Owned ? " owned" : " not owned";
     }
 
     /// <summary>Whether this enemy is currently a puppet (used by the Die patch).</summary>
@@ -530,7 +551,7 @@ internal static class EnemyTracker
                 {
                     tracked.LastHandoverSent = now;
                     Log.Debug($"{hm.name} ({tracked.Id}) is stuck walking in place, handing it to player {stuckTarget}");
-                    Client.SendHandover(tracked.Id, stuckTarget);
+                    SendHandover(tracked, stuckTarget, now);
                 }
 
                 continue;
@@ -588,8 +609,30 @@ internal static class EnemyTracker
 
             tracked.LastHandoverSent = now;
             Log.Debug($"Handing {hm.name} ({tracked.Id}) to player {bestId} ({bestDist:F1} vs our {myDist:F1})");
-            Client.SendHandover(tracked.Id, bestId);
+            SendHandover(tracked, bestId, now);
         }
+    }
+
+    /// <summary>Hand an enemy over, with its latest FSM variables first so the new owner has them.</summary>
+    private static void SendHandover(TrackedEnemy tracked, ushort toPlayerId, float now)
+    {
+        if (tracked.Mirror.TryCaptureVars(tracked.Id, now, true, out var vars))
+        {
+            Client.SendFsmVars(vars);
+        }
+
+        Client.SendHandover(tracked.Id, toPlayerId);
+    }
+
+    internal static void OnRemoteFsmVars(EnemyFsmVarsPacket packet)
+    {
+        if (!Active || !Config.SyncMovement || OwnsEnemy(packet.EnemyId) ||
+            !ById.TryGetValue(packet.EnemyId, out var tracked) || tracked.Hm == null)
+        {
+            return;
+        }
+
+        tracked.Mirror.SetOwnerVars(packet.Fsms);
     }
 
     /// <summary>The other player in <see cref="NearbyPlayers"/> nearest to a position, by <see cref="HandoverDistance"/>.</summary>
@@ -703,6 +746,7 @@ internal static class EnemyTracker
             var hm = tracked.Hm;
             if (hm == null)
             {
+                CheckDespawned(tracked, now);
                 continue;
             }
 
@@ -724,10 +768,17 @@ internal static class EnemyTracker
                 tracked.Mirror.TickOwned();
             }
 
-            if (sendState && tracked.Owned && !tracked.KnownDead && !hm.isDead &&
-                tracked.Mirror.TryCapture(tracked.Id, now, StateHeartbeat, out var state))
+            if (sendState && tracked.Owned && !tracked.KnownDead && !hm.isDead)
             {
-                Client.SendState(state);
+                if (tracked.Mirror.TryCapture(tracked.Id, now, StateHeartbeat, out var state))
+                {
+                    Client.SendState(state);
+                }
+
+                if (tracked.Mirror.TryCaptureVars(tracked.Id, now, false, out var vars))
+                {
+                    Client.SendFsmVars(vars);
+                }
             }
 
             CheckZeroHpDeath(tracked, now);
@@ -754,6 +805,62 @@ internal static class EnemyTracker
         }
 
         CheckHandovers(now);
+    }
+
+    /// <summary>
+    /// Owner side: our copy of an enemy was destroyed without dying, e.g. an arena decoy that digs
+    /// away and removes itself. Arenas count the enemies left in each wave, so a copy that stays on
+    /// another player's game would keep their arena from ever ending: tell them to remove it too.
+    /// Ignored while a room is being unloaded (that destroys everything).
+    /// </summary>
+    private static void CheckDespawned(TrackedEnemy tracked, float now)
+    {
+        if (tracked.DespawnHandled || tracked.KnownDead || !tracked.Owned || !Config.SyncDeath)
+        {
+            return;
+        }
+
+        var gm = GameManager.SilentInstance;
+        if (gm == null || gm.IsInSceneTransition || !SceneManager.GetSceneByName(tracked.SceneName).isLoaded)
+        {
+            tracked.GoneSince = -1f;
+            return;
+        }
+
+        // Wait a moment, so a room that is starting to unload is not mistaken for removed enemies
+        if (tracked.GoneSince < 0f)
+        {
+            tracked.GoneSince = now;
+            return;
+        }
+
+        if (now - tracked.GoneSince < 0.3f)
+        {
+            return;
+        }
+
+        tracked.DespawnHandled = true;
+        Log.Debug($"Enemy {tracked.Id} was removed without dying, removing it for everyone");
+        Client.SendDespawn(tracked.Id);
+    }
+
+    internal static void OnRemoteDespawn(uint id)
+    {
+        if (!Active || !Config.SyncDeath || !ById.TryGetValue(id, out var tracked))
+        {
+            return;
+        }
+
+        var hm = tracked.Hm;
+        if (hm == null || tracked.DespawnHandled || tracked.KnownDead || tracked.Owned)
+        {
+            return;
+        }
+
+        tracked.DespawnHandled = true;
+        tracked.KnownDead = true;
+        Log.Debug($"Removing {hm.name} ({id}): its owner's copy was removed without dying");
+        Object.Destroy(hm.gameObject);
     }
 
     /// <summary>
@@ -1035,8 +1142,10 @@ internal static class EnemyTracker
 
         tracked.PendingDeath = false;
 
-        // Give the enemy its FSMs back so its own death sequence can play
+        // Give the enemy its FSMs back so its own death sequence can play, with the owner's variables
+        // (e.g. whether it calls another enemy in when it dies)
         tracked.Mirror.Unpuppetize(resumeOwnerState: false);
+        tracked.Mirror.PrepareForRemoteDeath();
 
         ApplyingRemote = true;
         try

@@ -34,4 +34,19 @@ public enum PacketId : byte
     /// enemy that its owner's copy is waiting for (e.g. another enemy calling it in) (collection).
     /// </summary>
     EnemyFsmEvent = 8,
+
+    /// <summary>
+    /// Enemy owner -> server -> others in the room: the owner's copy of an enemy was removed without
+    /// dying (e.g. it dug away for good), so everyone removes theirs (collection).
+    /// </summary>
+    EnemyDespawn = 9,
+
+    /// <summary>Client -> server -> others in the room: an arena (BattleScene) was cleared (collection).</summary>
+    ArenaCleared = 10,
+
+    /// <summary>
+    /// Enemy owner -> server -> others in the room: the values of an enemy's FSM variables, so a
+    /// new owner continues with the old owner's (collection).
+    /// </summary>
+    EnemyFsmVars = 11,
 }

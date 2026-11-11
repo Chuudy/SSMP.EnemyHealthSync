@@ -35,6 +35,10 @@ internal class Client : ClientAddon
             p => DownedState.OnRemoteDowned(p.PlayerId, p.Downed, p.ReviveHits, p.ReviveHitsNeeded));
         receiver.RegisterPacketHandler<ReviveHitPacket>(PacketId.ReviveHit, _ => DownedState.OnReviveHit());
         receiver.RegisterPacketHandler<EnemyFsmEventPacket>(PacketId.EnemyFsmEvent, EnemyTracker.OnRemoteFsmEvent);
+        receiver.RegisterPacketHandler<EnemyFsmVarsPacket>(PacketId.EnemyFsmVars, EnemyTracker.OnRemoteFsmVars);
+        receiver.RegisterPacketHandler<EnemyDespawnPacket>(PacketId.EnemyDespawn,
+            p => EnemyTracker.OnRemoteDespawn(p.EnemyId));
+        receiver.RegisterPacketHandler<ArenaClearedPacket>(PacketId.ArenaCleared, p => ArenaSync.OnRemoteCleared(p.ArenaId));
 
         clientApi.ClientManager.ConnectEvent += EnemyTracker.OnConnected;
         clientApi.ClientManager.DisconnectEvent += EnemyTracker.OnDisconnected;
@@ -78,6 +82,21 @@ internal class Client : ClientAddon
         {
             EnemyId = enemyId, FsmIndex = (byte) fsmIndex, EventName = eventName
         }));
+    }
+
+    internal static void SendFsmVars(EnemyFsmVarsPacket packet)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyFsmVars, packet));
+    }
+
+    internal static void SendDespawn(uint enemyId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyDespawn, new EnemyDespawnPacket { EnemyId = enemyId }));
+    }
+
+    internal static void SendArenaCleared(uint arenaId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.ArenaCleared, new ArenaClearedPacket { ArenaId = arenaId }));
     }
 
     internal static void SendDeath(uint enemyId)

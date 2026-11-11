@@ -347,6 +347,168 @@ public sealed class EnemyFsmEventPacket : IPacketData
     }
 }
 
+/// <summary>The owner's copy of an enemy was removed without dying; remove it everywhere.</summary>
+public sealed class EnemyDespawnPacket : IPacketData
+{
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    public uint EnemyId { get; set; }
+
+    public void WriteData(IPacket packet) => packet.Write(EnemyId);
+    public void ReadData(IPacket packet) => EnemyId = packet.ReadUInt();
+}
+
+/// <summary>
+/// An arena was cleared on one player's game. Arenas run separately on each game, so one that got
+/// out of step elsewhere (and would never end) is ended too, opening its gates.
+/// </summary>
+public sealed class ArenaClearedPacket : IPacketData
+{
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    /// <summary>Hash of the arena's scene and hierarchy path (the same rule as enemy IDs).</summary>
+    public uint ArenaId { get; set; }
+
+    public void WriteData(IPacket packet) => packet.Write(ArenaId);
+    public void ReadData(IPacket packet) => ArenaId = packet.ReadUInt();
+}
+
+/// <summary>The values of one FSM's plain variables (no object references), in the FSM's own order.</summary>
+public sealed class FsmVarSet
+{
+    private const int MaxCount = 255;
+    private const int MaxStringLength = 128;
+
+    public bool[] Bools = [];
+    public int[] Ints = [];
+    public float[] Floats = [];
+    public string[] Strings = [];
+
+    /// <summary>Vector2 variables, two floats each.</summary>
+    public float[] Vector2s = [];
+
+    /// <summary>Vector3 variables, three floats each.</summary>
+    public float[] Vector3s = [];
+
+    internal void Write(IPacket packet)
+    {
+        var boolCount = System.Math.Min(Bools.Length, MaxCount);
+        packet.Write((byte) boolCount);
+        for (var i = 0; i < boolCount; i += 8)
+        {
+            byte bits = 0;
+            for (var b = 0; b < 8 && i + b < boolCount; b++)
+            {
+                if (Bools[i + b]) bits |= (byte) (1 << b);
+            }
+
+            packet.Write(bits);
+        }
+
+        var intCount = System.Math.Min(Ints.Length, MaxCount);
+        packet.Write((byte) intCount);
+        for (var i = 0; i < intCount; i++) packet.Write(Ints[i]);
+
+        var floatCount = System.Math.Min(Floats.Length, MaxCount);
+        packet.Write((byte) floatCount);
+        for (var i = 0; i < floatCount; i++) packet.Write(Floats[i]);
+
+        var stringCount = System.Math.Min(Strings.Length, MaxCount);
+        packet.Write((byte) stringCount);
+        for (var i = 0; i < stringCount; i++)
+        {
+            var s = Strings[i] ?? "";
+            packet.Write(s.Length > MaxStringLength ? s.Substring(0, MaxStringLength) : s);
+        }
+
+        WriteFloats(packet, Vector2s, 2);
+        WriteFloats(packet, Vector3s, 3);
+    }
+
+    private static void WriteFloats(IPacket packet, float[] values, int perItem)
+    {
+        var count = System.Math.Min(values.Length / perItem, MaxCount);
+        packet.Write((byte) count);
+        for (var i = 0; i < count * perItem; i++) packet.Write(values[i]);
+    }
+
+    internal static FsmVarSet Read(IPacket packet)
+    {
+        var set = new FsmVarSet();
+
+        var boolCount = packet.ReadByte();
+        set.Bools = new bool[boolCount];
+        for (var i = 0; i < boolCount; i += 8)
+        {
+            var bits = packet.ReadByte();
+            for (var b = 0; b < 8 && i + b < boolCount; b++)
+            {
+                set.Bools[i + b] = (bits & (1 << b)) != 0;
+            }
+        }
+
+        set.Ints = new int[packet.ReadByte()];
+        for (var i = 0; i < set.Ints.Length; i++) set.Ints[i] = packet.ReadInt();
+
+        set.Floats = new float[packet.ReadByte()];
+        for (var i = 0; i < set.Floats.Length; i++) set.Floats[i] = packet.ReadFloat();
+
+        set.Strings = new string[packet.ReadByte()];
+        for (var i = 0; i < set.Strings.Length; i++) set.Strings[i] = packet.ReadString();
+
+        set.Vector2s = new float[packet.ReadByte() * 2];
+        for (var i = 0; i < set.Vector2s.Length; i++) set.Vector2s[i] = packet.ReadFloat();
+
+        set.Vector3s = new float[packet.ReadByte() * 3];
+        for (var i = 0; i < set.Vector3s.Length; i++) set.Vector3s[i] = packet.ReadFloat();
+
+        return set;
+    }
+}
+
+/// <summary>
+/// The values of an enemy's FSM variables on its owner (bools, ints, floats, strings, vectors).
+/// States set them up and later states rely on them (whether to call another enemy when dying,
+/// where to dig back up); a new owner whose FSMs jump to the old owner's states would otherwise
+/// not have them.
+/// </summary>
+public sealed class EnemyFsmVarsPacket : IPacketData
+{
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    public uint EnemyId { get; set; }
+
+    /// <summary>Per FSM (in the same order as <see cref="EnemyStatePacket.FsmStates"/>), or null for none.</summary>
+    public FsmVarSet?[] Fsms { get; set; } = [];
+
+    public void WriteData(IPacket packet)
+    {
+        packet.Write(EnemyId);
+        var count = (byte) System.Math.Min(Fsms.Length, EnemyStatePacket.MaxFsms);
+        packet.Write(count);
+        for (var i = 0; i < count; i++)
+        {
+            var set = Fsms[i];
+            packet.Write(set != null);
+            set?.Write(packet);
+        }
+    }
+
+    public void ReadData(IPacket packet)
+    {
+        EnemyId = packet.ReadUInt();
+        var count = System.Math.Min((int) packet.ReadByte(), EnemyStatePacket.MaxFsms);
+        Fsms = new FsmVarSet?[count];
+        for (var i = 0; i < count; i++)
+        {
+            Fsms[i] = packet.ReadBool() ? FsmVarSet.Read(packet) : null;
+        }
+    }
+}
+
 internal static class Packets
 {
     /// <summary>Packet instantiator shared by the client and server receivers.</summary>
@@ -363,6 +525,9 @@ internal static class Packets
             PacketId.PlayerDowned => new PacketDataCollection<PlayerDownedPacket>(),
             PacketId.ReviveHit => new PacketDataCollection<ReviveHitPacket>(),
             PacketId.EnemyFsmEvent => new PacketDataCollection<EnemyFsmEventPacket>(),
+            PacketId.EnemyDespawn => new PacketDataCollection<EnemyDespawnPacket>(),
+            PacketId.ArenaCleared => new PacketDataCollection<ArenaClearedPacket>(),
+            PacketId.EnemyFsmVars => new PacketDataCollection<EnemyFsmVarsPacket>(),
             _ => throw new System.ArgumentOutOfRangeException(nameof(packetId), packetId, null)
         };
     }

@@ -203,6 +203,59 @@ internal static class EnemyRelay
         Server.SendFsmEvent(packet, owner);
     }
 
+    /// <summary>The owner's copy of an enemy was removed without dying; others remove theirs.</summary>
+    internal static void OnDespawn(ushort playerId, EnemyDespawnPacket packet)
+    {
+        ushort[] targets;
+        lock (Lock)
+        {
+            if (!PlayerScene.TryGetValue(playerId, out var scene) ||
+                !RoomPlayers.TryGetValue(scene, out var players) ||
+                OwnerOf(scene, players, packet.EnemyId) != playerId)
+            {
+                return;
+            }
+
+            targets = players.Where(p => p != playerId).ToArray();
+            OwnerOverrides.TryGetValue(scene, out var overrides);
+            overrides?.Remove(packet.EnemyId);
+        }
+
+        foreach (var target in targets)
+        {
+            Server.SendDespawn(packet, target);
+        }
+    }
+
+    internal static void OnFsmVars(ushort playerId, EnemyFsmVarsPacket packet)
+    {
+        ushort[] targets;
+        lock (Lock)
+        {
+            if (!PlayerScene.TryGetValue(playerId, out var scene) ||
+                !RoomPlayers.TryGetValue(scene, out var players) ||
+                OwnerOf(scene, players, packet.EnemyId) != playerId)
+            {
+                return;
+            }
+
+            targets = players.Where(p => p != playerId).ToArray();
+        }
+
+        foreach (var target in targets)
+        {
+            Server.SendFsmVars(packet, target);
+        }
+    }
+
+    internal static void OnArenaCleared(ushort playerId, ArenaClearedPacket packet)
+    {
+        foreach (var target in GetOthersInScene(playerId, out _))
+        {
+            Server.SendArenaCleared(packet, target);
+        }
+    }
+
     internal static void OnDamage(ushort playerId, EnemyDamagePacket packet)
     {
         if (packet.Damage <= 0)

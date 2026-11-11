@@ -102,6 +102,21 @@ internal sealed class EnemyMirror
     /// </summary>
     private int _resumeFsmFrame = -1;
 
+    /// <summary>
+    /// Frames a restarted FSM gets to run its own setup (finding its children, choosing its role
+    /// from its animation, e.g. "calls a flying Skarr when it dies") before jumping to the owner's
+    /// states. Start states usually wait a frame before moving on.
+    /// </summary>
+    private const int ResumeSetupFrames = 3;
+
+    /// <summary>Puppet side: the owner's latest FSM variable values, or null before any arrived.</summary>
+    private FsmVarSet?[]? _ownerVars;
+
+    // Owner side: FSM variables sent at most this often, and only when they changed
+    private const float VarsInterval = 0.5f;
+    private float _lastVarsSent = -999f;
+    private uint _lastVarsHash;
+
     private Vector2 _target;
     private bool _hasTarget;
 
@@ -249,6 +264,179 @@ internal sealed class EnemyMirror
         }
 
         return false;
+    }
+
+    // ------------------------------------------------------------------ FSM variables
+
+    /// <summary>
+    /// Owner side: the enemy's FSM variables, when they changed and <see cref="VarsInterval"/> has
+    /// passed (or always with <paramref name="force"/>, e.g. right before a handover).
+    /// </summary>
+    internal bool TryCaptureVars(uint id, float now, bool force, out EnemyFsmVarsPacket packet)
+    {
+        packet = null!;
+        if (_fsms.Length == 0 || _resumeFsmFrame >= 0 || (!force && now - _lastVarsSent < VarsInterval))
+        {
+            return false;
+        }
+
+        var sets = new FsmVarSet?[_fsms.Length];
+        var hash = 2166136261u;
+        for (var i = 0; i < _fsms.Length; i++)
+        {
+            sets[i] = CaptureVars(_fsms[i], ref hash);
+        }
+
+        if (!force && hash == _lastVarsHash)
+        {
+            return false;
+        }
+
+        _lastVarsHash = hash;
+        _lastVarsSent = now;
+        packet = new EnemyFsmVarsPacket { EnemyId = id, Fsms = sets };
+        return true;
+    }
+
+    private static FsmVarSet? CaptureVars(PlayMakerFSM? fsm, ref uint hash)
+    {
+        var vars = fsm != null ? fsm.FsmVariables : null;
+        if (vars == null)
+        {
+            return null;
+        }
+
+        var set = new FsmVarSet
+        {
+            Bools = vars.BoolVariables.Select(v => v.Value).ToArray(),
+            Ints = vars.IntVariables.Select(v => v.Value).ToArray(),
+            Floats = vars.FloatVariables.Select(v => v.Value).ToArray(),
+            Strings = vars.StringVariables.Select(v => v.Value ?? "").ToArray(),
+            Vector2s = vars.Vector2Variables.SelectMany(v => new[] { v.Value.x, v.Value.y }).ToArray(),
+            Vector3s = vars.Vector3Variables.SelectMany(v => new[] { v.Value.x, v.Value.y, v.Value.z }).ToArray(),
+        };
+
+        unchecked
+        {
+            foreach (var b in set.Bools) hash = (hash ^ (b ? 1u : 0u)) * 16777619u;
+            foreach (var n in set.Ints) hash = (hash ^ (uint) n) * 16777619u;
+            foreach (var f in set.Floats) hash = (hash ^ (uint) BitConverter.SingleToInt32Bits(f)) * 16777619u;
+            foreach (var s in set.Strings) hash = (hash ^ (uint) s.GetHashCode()) * 16777619u;
+            foreach (var f in set.Vector2s) hash = (hash ^ (uint) BitConverter.SingleToInt32Bits(f)) * 16777619u;
+            foreach (var f in set.Vector3s) hash = (hash ^ (uint) BitConverter.SingleToInt32Bits(f)) * 16777619u;
+        }
+
+        return set;
+    }
+
+    /// <summary>
+    /// Before a death from the owner: start FSMs that never ran (a puppet's may not have), so their
+    /// start state runs now and not when the death event arrives, which would reset variables
+    /// (e.g. "call another enemy when dying") after the owner's were applied. Then apply those.
+    /// </summary>
+    internal void PrepareForRemoteDeath()
+    {
+        if (_go.activeInHierarchy)
+        {
+            foreach (var fsm in _fsms)
+            {
+                try
+                {
+                    if (fsm != null && fsm.enabled && fsm.Fsm != null && !fsm.Fsm.Started)
+                    {
+                        fsm.Fsm.Start();
+                    }
+                }
+                catch (Exception e)
+                {
+                    Utils.Log.Debug($"{_go.name}: could not start FSM '{fsm!.FsmName}': {e.Message}");
+                }
+            }
+        }
+
+        ApplyOwnerVars();
+    }
+
+    /// <summary>Puppet side: remember the owner's FSM variables, for when we take the enemy over.</summary>
+    internal void SetOwnerVars(FsmVarSet?[] sets) => _ownerVars = sets;
+
+    /// <summary>
+    /// Give our FSMs the owner's variable values (where the variable lists match). Object references
+    /// are not touched: our own FSM setup finds our own children and hero.
+    /// </summary>
+    internal void ApplyOwnerVars()
+    {
+        if (_ownerVars == null)
+        {
+            return;
+        }
+
+        var applied = 0;
+        for (var i = 0; i < _fsms.Length && i < _ownerVars.Length; i++)
+        {
+            var set = _ownerVars[i];
+            var vars = _fsms[i] != null ? _fsms[i].FsmVariables : null;
+            if (set == null || vars == null)
+            {
+                continue;
+            }
+
+            try
+            {
+                var bools = vars.BoolVariables;
+                if (bools.Length == set.Bools.Length)
+                {
+                    for (var v = 0; v < bools.Length; v++) bools[v].Value = set.Bools[v];
+                }
+
+                var ints = vars.IntVariables;
+                if (ints.Length == set.Ints.Length)
+                {
+                    for (var v = 0; v < ints.Length; v++) ints[v].Value = set.Ints[v];
+                }
+
+                var floats = vars.FloatVariables;
+                if (floats.Length == set.Floats.Length)
+                {
+                    for (var v = 0; v < floats.Length; v++) floats[v].Value = set.Floats[v];
+                }
+
+                var strings = vars.StringVariables;
+                if (strings.Length == set.Strings.Length)
+                {
+                    for (var v = 0; v < strings.Length; v++) strings[v].Value = set.Strings[v];
+                }
+
+                var v2 = vars.Vector2Variables;
+                if (v2.Length * 2 == set.Vector2s.Length)
+                {
+                    for (var v = 0; v < v2.Length; v++)
+                    {
+                        v2[v].Value = new Vector2(set.Vector2s[v * 2], set.Vector2s[v * 2 + 1]);
+                    }
+                }
+
+                var v3 = vars.Vector3Variables;
+                if (v3.Length * 3 == set.Vector3s.Length)
+                {
+                    for (var v = 0; v < v3.Length; v++)
+                    {
+                        v3[v].Value = new Vector3(set.Vector3s[v * 3], set.Vector3s[v * 3 + 1], set.Vector3s[v * 3 + 2]);
+                    }
+                }
+
+                applied++;
+            }
+            catch (Exception e)
+            {
+                Utils.Log.Debug($"{_go.name}: could not apply the owner's variables to FSM '{_fsms[i].FsmName}': {e.Message}");
+            }
+        }
+
+        if (applied > 0)
+        {
+            Utils.Log.Debug($"{_go.name}: applied the owner's variables to {applied} FSM(s)");
+        }
     }
 
     /// <summary>Owner side: the enemy is hidden (burrowed, dormant, waiting for its arena wave).</summary>
@@ -503,6 +691,7 @@ internal sealed class EnemyMirror
 
         _resumeFsmFrame = -1;
         var restartClip = _animator != null ? _animator.CurrentClip : null;
+        ApplyOwnerVars();
         ResumeOwnerFsmStates();
         FixRestartClip(restartClip);
         RestoreOwnerContact();
@@ -845,7 +1034,7 @@ internal sealed class EnemyMirror
 
         _savedDamage.Clear();
 
-        _resumeFsmFrame = resumeOwnerState && _ownerFsmStates.Length > 0 ? Time.frameCount + 1 : -1;
+        _resumeFsmFrame = resumeOwnerState && _ownerFsmStates.Length > 0 ? Time.frameCount + ResumeSetupFrames : -1;
         _stuckSince = -1f;
 
         if (_body != null)

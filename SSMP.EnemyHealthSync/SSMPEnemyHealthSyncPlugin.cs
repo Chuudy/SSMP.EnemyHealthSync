@@ -27,6 +27,7 @@ public partial class SSMPEnemyHealthSyncPlugin : BaseUnityPlugin
         Client.DownedState.Update();
         Client.EnemyTracker.Update();
         Client.TeleportBack.Update();
+        Client.ArenaSync.Update();
         Client.BellBeastProbe.Update();
     }
 
