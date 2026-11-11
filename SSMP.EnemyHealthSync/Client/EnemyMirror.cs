@@ -180,6 +180,77 @@ internal sealed class EnemyMirror
         }
     }
 
+    /// <summary>The enemy's synced FSMs, by index.</summary>
+    internal IReadOnlyList<PlayMakerFSM> Fsms => _fsms;
+
+    /// <summary>
+    /// Puppet side: whether the owner's copy of FSM <paramref name="index"/>, in the state the owner
+    /// last reported, reacts to <paramref name="eventName"/> (a transition of that state, or a
+    /// global transition). Only those events are worth sending to the owner.
+    /// </summary>
+    internal bool OwnerStateHandles(int index, string eventName)
+    {
+        if (index < 0 || index >= _fsms.Length || index >= _ownerFsmStates.Length)
+        {
+            return false;
+        }
+
+        var fsm = _fsms[index];
+        var stateIndex = _ownerFsmStates[index];
+        var states = fsm != null ? fsm.FsmStates : null;
+        if (states == null || stateIndex == EnemyStatePacket.NoFsmState || stateIndex >= states.Length)
+        {
+            return false;
+        }
+
+        return Handles(states[stateIndex]?.Transitions, eventName) || Handles(fsm!.FsmGlobalTransitions, eventName);
+    }
+
+    /// <summary>
+    /// Owner side: deliver an event that reached another player's puppet of this enemy, if our
+    /// FSM is still in a state that reacts to it (it may have moved on, or got it itself).
+    /// </summary>
+    internal bool DeliverRemoteEvent(int index, string eventName)
+    {
+        if (IsPuppet || index < 0 || index >= _fsms.Length)
+        {
+            return false;
+        }
+
+        var fsm = _fsms[index];
+        if (fsm == null || !fsm.enabled || fsm.Fsm == null)
+        {
+            return false;
+        }
+
+        var active = fsm.Fsm.ActiveState;
+        if (!Handles(active?.Transitions, eventName) && !Handles(fsm.FsmGlobalTransitions, eventName))
+        {
+            return false;
+        }
+
+        fsm.SendEvent(eventName);
+        return true;
+    }
+
+    private static bool Handles(HutongGames.PlayMaker.FsmTransition[]? transitions, string eventName)
+    {
+        if (transitions == null)
+        {
+            return false;
+        }
+
+        foreach (var t in transitions)
+        {
+            if (t != null && t.EventName == eventName)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Owner side: the enemy is hidden (burrowed, dormant, waiting for its arena wave).</summary>
     internal bool IsHidden => _renderer != null && !_renderer.enabled;
 

@@ -315,6 +315,38 @@ public sealed class ReviveHitPacket : IPacketData
     public void ReadData(IPacket packet) => TargetPlayerId = packet.ReadUShort();
 }
 
+/// <summary>
+/// A PlayMaker event that reached a puppet's FSM, for the enemy's owner to deliver to its copy.
+/// Enemies call each other with events (e.g. a scout calling in a flying Skarr, an arena starting
+/// a wave); those only fire on the game that runs the sender, where the receiver may be a puppet.
+/// </summary>
+public sealed class EnemyFsmEventPacket : IPacketData
+{
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    public uint EnemyId { get; set; }
+
+    /// <summary>Index of the FSM among the enemy's FSMs (hierarchy order).</summary>
+    public byte FsmIndex { get; set; }
+
+    public string EventName { get; set; } = "";
+
+    public void WriteData(IPacket packet)
+    {
+        packet.Write(EnemyId);
+        packet.Write(FsmIndex);
+        packet.Write(EventName ?? "");
+    }
+
+    public void ReadData(IPacket packet)
+    {
+        EnemyId = packet.ReadUInt();
+        FsmIndex = packet.ReadByte();
+        EventName = packet.ReadString();
+    }
+}
+
 internal static class Packets
 {
     /// <summary>Packet instantiator shared by the client and server receivers.</summary>
@@ -330,6 +362,7 @@ internal static class Packets
             PacketId.Handover => new PacketDataCollection<HandoverPacket>(),
             PacketId.PlayerDowned => new PacketDataCollection<PlayerDownedPacket>(),
             PacketId.ReviveHit => new PacketDataCollection<ReviveHitPacket>(),
+            PacketId.EnemyFsmEvent => new PacketDataCollection<EnemyFsmEventPacket>(),
             _ => throw new System.ArgumentOutOfRangeException(nameof(packetId), packetId, null)
         };
     }

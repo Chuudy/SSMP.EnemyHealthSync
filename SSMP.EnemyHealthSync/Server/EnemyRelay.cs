@@ -181,6 +181,28 @@ internal static class EnemyRelay
         }
     }
 
+    /// <summary>A puppet's FSM got an event; only the enemy's owner can act on it.</summary>
+    internal static void OnFsmEvent(ushort playerId, EnemyFsmEventPacket packet)
+    {
+        ushort owner;
+        lock (Lock)
+        {
+            if (!PlayerScene.TryGetValue(playerId, out var scene) ||
+                !RoomPlayers.TryGetValue(scene, out var players))
+            {
+                return;
+            }
+
+            owner = OwnerOf(scene, players, packet.EnemyId);
+            if (owner == playerId || !players.Contains(owner))
+            {
+                return;
+            }
+        }
+
+        Server.SendFsmEvent(packet, owner);
+    }
+
     internal static void OnDamage(ushort playerId, EnemyDamagePacket packet)
     {
         if (packet.Damage <= 0)

@@ -79,6 +79,26 @@ internal static class EnemyTracker
 
     private static readonly List<TrackedEnemy> UpdateBuffer = new();
 
+    /// <summary>Each tracked enemy's synced FSMs, for routing events that reach a puppet.</summary>
+    private static readonly Dictionary<PlayMakerFSM, (TrackedEnemy Enemy, int Index)> FsmOwners = new();
+
+    /// <summary>When each (enemy, FSM, event) was last sent to its owner, to drop repeats.</summary>
+    private static readonly Dictionary<(uint, int, string), float> LastFsmEventSent = new();
+
+    private const float FsmEventRepeatInterval = 0.3f;
+
+    /// <summary>
+    /// Events HealthManager sends an enemy's FSMs when it is hit or dies. The owner gets these by
+    /// playing every hit for real, so a puppet's copies are never forwarded.
+    /// </summary>
+    private static readonly HashSet<string> LocalOnlyEvents = new(StringComparer.Ordinal)
+    {
+        "FINISHED", "ATTACK BLOCKED", "BLOCKED DOWN", "BLOCKED EXPLOSION", "BLOCKED HIT L", "BLOCKED HIT R",
+        "BLOCKED HIT U", "BLOCKED HIT", "DEALT ACTUAL DAMAGE", "DEALT DAMAGE", "EXTRACT", "FATAL DAMAGE",
+        "HIT LANDED", "HIT", "KILLED", "LAVA DEATH", "STUN DAMAGE", "TOOK DAMAGE", "TOOK EXPLOSION DAMAGE",
+        "TOOK HEAVY DAMAGE", "TOOK SPELL DAMAGE", "TOOK TAG DAMAGE", "WEAK HIT", "ZERO HP",
+    };
+
     private static float _lastRescanTime = -999f;
     private const float RescanInterval = 1f;
 
@@ -200,6 +220,8 @@ internal static class EnemyTracker
         ByHm.Clear();
         ById.Clear();
         Pending.Clear();
+        FsmOwners.Clear();
+        LastFsmEventSent.Clear();
         _lastRescanTime = -999f;
         _ownershipKnown = false;
         _isRoomHost = false;
@@ -276,6 +298,15 @@ internal static class EnemyTracker
         };
         ByHm[hm] = tracked;
         ById[id] = tracked;
+
+        var fsms = tracked.Mirror.Fsms;
+        for (var i = 0; i < fsms.Count; i++)
+        {
+            if (fsms[i] != null)
+            {
+                FsmOwners[fsms[i]] = (tracked, i);
+            }
+        }
 
         if (OwnsEnemy(id))
         {
@@ -750,6 +781,70 @@ internal static class EnemyTracker
             Log.Debug($"{hm.name} ({tracked.Id}) stayed at 0 HP without isDead, treating it as dead");
             SendDeathIfNew(tracked);
         }
+    }
+
+    // ------------------------------------------------------------------ FSM events
+
+    /// <summary>
+    /// Called (from a Harmony patch) for every PlayMaker event delivered to an FSM. Returns false to
+    /// drop it. A puppet's FSMs are off, but PlayMaker still runs events through them and would enter
+    /// states locally; a puppet only follows its owner, so they are dropped. Events the owner's copy
+    /// is waiting for (another enemy calling it in, an arena starting a wave) only fire on the game
+    /// that runs the sender, where the receiver may be a puppet: those are sent to the owner.
+    /// </summary>
+    internal static bool OnFsmEvent(PlayMakerFSM? component, string? eventName)
+    {
+        if (component == null || !Active || !Config.SyncMovement ||
+            !FsmOwners.TryGetValue(component, out var entry))
+        {
+            return true;
+        }
+
+        var tracked = entry.Enemy;
+        if (!tracked.Mirror.IsPuppet)
+        {
+            return true;
+        }
+
+        if (string.IsNullOrEmpty(eventName) || LocalOnlyEvents.Contains(eventName!) || tracked.KnownDead ||
+            !tracked.Mirror.OwnerStateHandles(entry.Index, eventName!))
+        {
+            return false;
+        }
+
+        var key = (tracked.Id, entry.Index, eventName!);
+        var now = Time.unscaledTime;
+        if (LastFsmEventSent.TryGetValue(key, out var last) && now - last < FsmEventRepeatInterval)
+        {
+            return false;
+        }
+
+        LastFsmEventSent[key] = now;
+        Log.Debug($"Sending event '{eventName}' for {tracked.Hm.name} ({tracked.Id}) FSM {entry.Index} to its owner");
+        Client.SendFsmEvent(tracked.Id, entry.Index, eventName!);
+        return false;
+    }
+
+    internal static void OnRemoteFsmEvent(EnemyFsmEventPacket packet)
+    {
+        if (!Active || !Config.SyncMovement || !ById.TryGetValue(packet.EnemyId, out var tracked) ||
+            tracked.Hm == null || tracked.KnownDead || !tracked.Owned)
+        {
+            return;
+        }
+
+        var delivered = false;
+        try
+        {
+            delivered = tracked.Mirror.DeliverRemoteEvent(packet.FsmIndex, packet.EventName);
+        }
+        catch (Exception e)
+        {
+            Log.Error($"Failed to deliver event '{packet.EventName}' to {tracked.Hm.name} ({tracked.Id}): {e}");
+        }
+
+        Log.Debug($"Remote event '{packet.EventName}' for {tracked.Hm.name} ({tracked.Id}) FSM {packet.FsmIndex}: " +
+                  (delivered ? "delivered" : "ignored (no longer waiting for it)"));
     }
 
     // ------------------------------------------------------------------ remote events (from packets)

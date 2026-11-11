@@ -28,4 +28,10 @@ public enum PacketId : byte
 
     /// <summary>Client -> server -> downed player: a teammate hit the downed player to revive them (collection).</summary>
     ReviveHit = 7,
+
+    /// <summary>
+    /// Client -> server -> the enemy's owner: a PlayMaker event reached our puppet copy of an
+    /// enemy that its owner's copy is waiting for (e.g. another enemy calling it in) (collection).
+    /// </summary>
+    EnemyFsmEvent = 8,
 }

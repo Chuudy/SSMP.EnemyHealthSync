@@ -28,6 +28,7 @@ internal class Server : ServerAddon
         receiver.RegisterPacketHandler<HandoverPacket>(PacketId.Handover, EnemyRelay.OnHandover);
         receiver.RegisterPacketHandler<PlayerDownedPacket>(PacketId.PlayerDowned, EnemyRelay.OnDowned);
         receiver.RegisterPacketHandler<ReviveHitPacket>(PacketId.ReviveHit, EnemyRelay.OnReviveHit);
+        receiver.RegisterPacketHandler<EnemyFsmEventPacket>(PacketId.EnemyFsmEvent, EnemyRelay.OnFsmEvent);
 
         serverApi.ServerManager.PlayerDisconnectEvent += player => EnemyRelay.OnPlayerDisconnect(player.Id);
         serverApi.ServerManager.ServerShutdownEvent += EnemyRelay.Clear;
@@ -44,6 +45,11 @@ internal class Server : ServerAddon
     internal static void SendState(EnemyStatePacket packet, ushort playerId)
     {
         Send(() => _sender!.SendCollectionData(PacketId.EnemyState, packet, playerId));
+    }
+
+    internal static void SendFsmEvent(EnemyFsmEventPacket packet, ushort playerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyFsmEvent, packet, playerId));
     }
 
     internal static void SendOwnership(RoomOwnershipPacket packet, ushort playerId)

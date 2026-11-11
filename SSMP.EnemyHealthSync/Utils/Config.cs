@@ -5,7 +5,7 @@ namespace SSMPEnemyHealthSync.Utils;
 internal static class Config
 {
     public const string ModName = "SSMP.EnemyHealthSync";
-    public const string Version = "1.4.2";
+    public const string Version = "1.4.3";
     public const uint SSMPApiVersion = 1;
 
     private static ConfigEntry<bool>? _enabled;

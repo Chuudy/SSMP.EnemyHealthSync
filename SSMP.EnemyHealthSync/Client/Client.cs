@@ -34,6 +34,7 @@ internal class Client : ClientAddon
         receiver.RegisterPacketHandler<PlayerDownedPacket>(PacketId.PlayerDowned,
             p => DownedState.OnRemoteDowned(p.PlayerId, p.Downed, p.ReviveHits, p.ReviveHitsNeeded));
         receiver.RegisterPacketHandler<ReviveHitPacket>(PacketId.ReviveHit, _ => DownedState.OnReviveHit());
+        receiver.RegisterPacketHandler<EnemyFsmEventPacket>(PacketId.EnemyFsmEvent, EnemyTracker.OnRemoteFsmEvent);
 
         clientApi.ClientManager.ConnectEvent += EnemyTracker.OnConnected;
         clientApi.ClientManager.DisconnectEvent += EnemyTracker.OnDisconnected;
@@ -69,6 +70,14 @@ internal class Client : ClientAddon
     {
         Send(() => _sender!.SendCollectionData(PacketId.Handover,
             new HandoverPacket { EnemyId = enemyId, ToPlayerId = toPlayerId }));
+    }
+
+    internal static void SendFsmEvent(uint enemyId, int fsmIndex, string eventName)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyFsmEvent, new EnemyFsmEventPacket
+        {
+            EnemyId = enemyId, FsmIndex = (byte) fsmIndex, EventName = eventName
+        }));
     }
 
     internal static void SendDeath(uint enemyId)
