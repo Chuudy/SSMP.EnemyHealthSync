@@ -932,6 +932,58 @@ internal static class EnemyTracker
         return false;
     }
 
+    /// <summary>
+    /// The enemy we own whose FSM this is, if any: one of its synced FSMs, or an FSM somewhere
+    /// below it (attack objects).
+    /// </summary>
+    internal static bool TryGetOwnedSpawner(HutongGames.PlayMaker.Fsm fsm, out uint enemyId, out Transform root)
+    {
+        enemyId = 0;
+        root = null!;
+
+        var component = fsm.FsmComponent;
+        if (component == null)
+        {
+            return false;
+        }
+
+        TrackedEnemy? tracked = null;
+        if (FsmOwners.TryGetValue(component, out var entry))
+        {
+            tracked = entry.Enemy;
+        }
+        else
+        {
+            var hm = component.GetComponentInParent<HealthManager>(true);
+            if (hm != null)
+            {
+                ByHm.TryGetValue(hm, out tracked);
+            }
+        }
+
+        if (tracked == null || tracked.Hm == null || !tracked.Owned || tracked.Mirror.IsPuppet)
+        {
+            return false;
+        }
+
+        enemyId = tracked.Id;
+        root = tracked.Hm.transform;
+        return true;
+    }
+
+    /// <summary>Our copy of an enemy, whoever runs it.</summary>
+    internal static bool TryGetEnemyRoot(uint enemyId, out Transform root)
+    {
+        root = null!;
+        if (!Active || !ById.TryGetValue(enemyId, out var tracked) || tracked.Hm == null)
+        {
+            return false;
+        }
+
+        root = tracked.Hm.transform;
+        return true;
+    }
+
     internal static void OnRemoteFsmEvent(EnemyFsmEventPacket packet)
     {
         if (!Active || !Config.SyncMovement || !ById.TryGetValue(packet.EnemyId, out var tracked) ||

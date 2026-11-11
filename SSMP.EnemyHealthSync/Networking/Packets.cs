@@ -509,6 +509,81 @@ public sealed class EnemyFsmVarsPacket : IPacketData
     }
 }
 
+/// <summary>An enemy spawned a projectile on its owner's game; the others spawn a copy.</summary>
+public sealed class EnemyProjectilePacket : IPacketData
+{
+    private const int MaxEvents = 4;
+
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    public uint EnemyId { get; set; }
+
+    /// <summary>Name of the projectile's prefab.</summary>
+    public string Prefab { get; set; } = "";
+
+    /// <summary>Spawned as a child of the enemy: position, rotation and scale are then local to it.</summary>
+    public bool Attached { get; set; }
+
+    public float X { get; set; }
+    public float Y { get; set; }
+    public float Z { get; set; }
+    public float RotationZ { get; set; }
+    public float ScaleX { get; set; }
+    public float ScaleY { get; set; }
+    public float VelocityX { get; set; }
+    public float VelocityY { get; set; }
+
+    /// <summary>Events the enemy sent the projectile right after spawning it: FSM name and event name.</summary>
+    public (string Fsm, string Event)[] Events { get; set; } = [];
+
+    public void WriteData(IPacket packet)
+    {
+        packet.Write(EnemyId);
+        packet.Write(Prefab ?? "");
+        packet.Write(Attached);
+        packet.Write(X);
+        packet.Write(Y);
+        packet.Write(Z);
+        packet.Write(RotationZ);
+        packet.Write(ScaleX);
+        packet.Write(ScaleY);
+        packet.Write(VelocityX);
+        packet.Write(VelocityY);
+
+        var count = (byte) System.Math.Min(Events.Length, MaxEvents);
+        packet.Write(count);
+        for (var i = 0; i < count; i++)
+        {
+            packet.Write(Events[i].Fsm ?? "");
+            packet.Write(Events[i].Event ?? "");
+        }
+    }
+
+    public void ReadData(IPacket packet)
+    {
+        EnemyId = packet.ReadUInt();
+        Prefab = packet.ReadString();
+        Attached = packet.ReadBool();
+        X = packet.ReadFloat();
+        Y = packet.ReadFloat();
+        Z = packet.ReadFloat();
+        RotationZ = packet.ReadFloat();
+        ScaleX = packet.ReadFloat();
+        ScaleY = packet.ReadFloat();
+        VelocityX = packet.ReadFloat();
+        VelocityY = packet.ReadFloat();
+
+        var count = System.Math.Min((int) packet.ReadByte(), MaxEvents);
+        Events = new (string, string)[count];
+        for (var i = 0; i < count; i++)
+        {
+            var fsm = packet.ReadString();
+            Events[i] = (fsm, packet.ReadString());
+        }
+    }
+}
+
 internal static class Packets
 {
     /// <summary>Packet instantiator shared by the client and server receivers.</summary>
@@ -528,6 +603,7 @@ internal static class Packets
             PacketId.EnemyDespawn => new PacketDataCollection<EnemyDespawnPacket>(),
             PacketId.ArenaCleared => new PacketDataCollection<ArenaClearedPacket>(),
             PacketId.EnemyFsmVars => new PacketDataCollection<EnemyFsmVarsPacket>(),
+            PacketId.EnemyProjectile => new PacketDataCollection<EnemyProjectilePacket>(),
             _ => throw new System.ArgumentOutOfRangeException(nameof(packetId), packetId, null)
         };
     }

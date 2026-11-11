@@ -32,6 +32,7 @@ internal class Server : ServerAddon
         receiver.RegisterPacketHandler<EnemyDespawnPacket>(PacketId.EnemyDespawn, EnemyRelay.OnDespawn);
         receiver.RegisterPacketHandler<ArenaClearedPacket>(PacketId.ArenaCleared, EnemyRelay.OnArenaCleared);
         receiver.RegisterPacketHandler<EnemyFsmVarsPacket>(PacketId.EnemyFsmVars, EnemyRelay.OnFsmVars);
+        receiver.RegisterPacketHandler<EnemyProjectilePacket>(PacketId.EnemyProjectile, EnemyRelay.OnProjectile);
 
         serverApi.ServerManager.PlayerDisconnectEvent += player => EnemyRelay.OnPlayerDisconnect(player.Id);
         serverApi.ServerManager.ServerShutdownEvent += EnemyRelay.Clear;
@@ -68,6 +69,11 @@ internal class Server : ServerAddon
     internal static void SendFsmVars(EnemyFsmVarsPacket packet, ushort playerId)
     {
         Send(() => _sender!.SendCollectionData(PacketId.EnemyFsmVars, packet, playerId));
+    }
+
+    internal static void SendProjectile(EnemyProjectilePacket packet, ushort playerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyProjectile, packet, playerId));
     }
 
     internal static void SendOwnership(RoomOwnershipPacket packet, ushort playerId)

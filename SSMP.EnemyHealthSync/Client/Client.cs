@@ -36,6 +36,7 @@ internal class Client : ClientAddon
         receiver.RegisterPacketHandler<ReviveHitPacket>(PacketId.ReviveHit, _ => DownedState.OnReviveHit());
         receiver.RegisterPacketHandler<EnemyFsmEventPacket>(PacketId.EnemyFsmEvent, EnemyTracker.OnRemoteFsmEvent);
         receiver.RegisterPacketHandler<EnemyFsmVarsPacket>(PacketId.EnemyFsmVars, EnemyTracker.OnRemoteFsmVars);
+        receiver.RegisterPacketHandler<EnemyProjectilePacket>(PacketId.EnemyProjectile, EnemyProjectiles.OnRemoteProjectile);
         receiver.RegisterPacketHandler<EnemyDespawnPacket>(PacketId.EnemyDespawn,
             p => EnemyTracker.OnRemoteDespawn(p.EnemyId));
         receiver.RegisterPacketHandler<ArenaClearedPacket>(PacketId.ArenaCleared, p => ArenaSync.OnRemoteCleared(p.ArenaId));
@@ -47,6 +48,7 @@ internal class Client : ClientAddon
         clientApi.ClientManager.PlayerDisconnectEvent += p => DownedState.OnPlayerLeft(p.Id);
 
         EnemyTracker.Init();
+        EnemyProjectiles.Init();
         DownedState.Init();
 
         Log.Info("Client addon initialized");
@@ -82,6 +84,11 @@ internal class Client : ClientAddon
         {
             EnemyId = enemyId, FsmIndex = (byte) fsmIndex, EventName = eventName
         }));
+    }
+
+    internal static void SendProjectile(EnemyProjectilePacket packet)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyProjectile, packet));
     }
 
     internal static void SendFsmVars(EnemyFsmVarsPacket packet)

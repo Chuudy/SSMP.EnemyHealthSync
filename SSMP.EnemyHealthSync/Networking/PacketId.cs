@@ -49,4 +49,7 @@ public enum PacketId : byte
     /// new owner continues with the old owner's (collection).
     /// </summary>
     EnemyFsmVars = 11,
+
+    /// <summary>Enemy owner -> server -> others in the room: an enemy spawned a projectile (collection).</summary>
+    EnemyProjectile = 12,
 }

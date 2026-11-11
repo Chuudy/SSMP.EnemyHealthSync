@@ -248,6 +248,18 @@ internal static class EnemyRelay
         }
     }
 
+    /// <summary>
+    /// Relayed from anyone in the room, not just the enemy's owner: right after a handover the old
+    /// owner's game still runs the enemy for a moment, and a throw made then is real on that game.
+    /// </summary>
+    internal static void OnProjectile(ushort playerId, EnemyProjectilePacket packet)
+    {
+        foreach (var target in GetOthersInScene(playerId, out _))
+        {
+            Server.SendProjectile(packet, target);
+        }
+    }
+
     internal static void OnArenaCleared(ushort playerId, ArenaClearedPacket packet)
     {
         foreach (var target in GetOthersInScene(playerId, out _))

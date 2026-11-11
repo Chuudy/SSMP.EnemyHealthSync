@@ -5,13 +5,14 @@ namespace SSMPEnemyHealthSync.Utils;
 internal static class Config
 {
     public const string ModName = "SSMP.EnemyHealthSync";
-    public const string Version = "1.4.4";
+    public const string Version = "1.4.5";
     public const uint SSMPApiVersion = 1;
 
     private static ConfigEntry<bool>? _enabled;
     private static ConfigEntry<bool>? _syncHealth;
     private static ConfigEntry<bool>? _syncDeath;
     private static ConfigEntry<bool>? _syncMovement;
+    private static ConfigEntry<bool>? _syncProjectiles;
     private static ConfigEntry<int>? _stateSendRate;
     private static ConfigEntry<bool>? _handover;
     private static ConfigEntry<float>? _handoverRange;
@@ -31,6 +32,7 @@ internal static class Config
     public static bool SyncHealth => Enabled && (_syncHealth?.Value ?? true);
     public static bool SyncDeath => Enabled && (_syncDeath?.Value ?? true);
     public static bool SyncMovement => Enabled && (_syncMovement?.Value ?? true);
+    public static bool SyncProjectiles => Enabled && (_syncProjectiles?.Value ?? true);
     public static int StateSendRate => _stateSendRate?.Value ?? 20;
     public static bool Handover => _handover?.Value ?? true;
     public static float HandoverRange => _handoverRange?.Value ?? 15f;
@@ -56,6 +58,9 @@ internal static class Config
         _syncMovement = config.Bind("General", "SyncMovement", true,
             "Each enemy's AI runs on one player's game; everyone else sees copies that follow its " +
             "movement, animations (attacks, flinches) and attack hitboxes");
+        _syncProjectiles = config.Bind("General", "SyncProjectiles", true,
+            "Projectiles an enemy fires appear on every player's game, and can hit every player " +
+            "(needs SyncMovement)");
         _stateSendRate = config.Bind("Network", "StateSendRate", 20, new ConfigDescription(
             "How many times per second enemy owners send enemy movement/animation updates",
             new AcceptableValueRange<int>(5, 60)));

@@ -31,6 +31,11 @@ public partial class SSMPEnemyHealthSyncPlugin : BaseUnityPlugin
         Client.BellBeastProbe.Update();
     }
 
+    private void LateUpdate()
+    {
+        Client.EnemyProjectiles.LateUpdate();
+    }
+
     private void OnGUI()
     {
         Client.ScreenOverlay.Draw();

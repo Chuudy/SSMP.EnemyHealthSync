@@ -13,7 +13,8 @@ internal static class HealthManagerHitPatch
 {
     private static bool Prefix(ref HitInstance hitInstance, ref IHitResponder.HitResponse __result)
     {
-        if (!EnemyTracker.IgnoreRemoteHits || !RemoteAttack.IsRemote(hitInstance.Source))
+        if (!EnemyTracker.IgnoreRemoteHits ||
+            (!RemoteAttack.IsRemote(hitInstance.Source) && !EnemyProjectiles.IsReplica(hitInstance.Source)))
         {
             return true;
         }

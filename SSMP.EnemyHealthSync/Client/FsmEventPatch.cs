@@ -20,6 +20,7 @@ internal static class FsmProcessEventPatch
 
         try
         {
+            EnemyProjectiles.OnFsmEvent(__instance, fsmEvent);
             return EnemyTracker.OnFsmEvent(__instance.FsmComponent, fsmEvent.Name);
         }
         catch (System.Exception e)
