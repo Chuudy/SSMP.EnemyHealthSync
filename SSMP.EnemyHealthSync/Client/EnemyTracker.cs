@@ -55,8 +55,8 @@ internal static class EnemyTracker
         internal float OwnedSince;
         internal float LastHandoverSent = -999f;
 
-        /// <summary>Since when a handover has been waiting for the enemy's attack to end, or -1.</summary>
-        internal float AttackingSince = -1f;
+        /// <summary>Since when a handover has been waiting for the enemy's attack or burrow to end, or -1.</summary>
+        internal float BusySince = -1f;
 
         /// <summary>Last time we recovered this enemy from walking in place.</summary>
         internal float LastStuckFix = -999f;
@@ -100,6 +100,7 @@ internal static class EnemyTracker
     private const float HandoverRetryInterval = 1f;
     private const float HandoverHold = 5f;
     private const float MaxAttackHandoverWait = 3f;
+    private const float MaxHiddenHandoverWait = 8f;
     private const float HandoverVerticalWeight = 2f;
     private const float StuckFixInterval = 10f;
     private const float HandoverMargin = 4f;
@@ -478,7 +479,10 @@ internal static class EnemyTracker
 
             // An enemy walking in place: its movement didn't start up again (e.g. after a takeover).
             // At most one recovery per StuckFixInterval, in case an enemy walks in place on purpose.
-            if (!downed && active && tracked.Mirror.CheckStuck(now) && now - tracked.LastStuckFix >= StuckFixInterval)
+            // A hidden enemy (burrowed, dormant) may move or stand still on purpose
+            var hidden = tracked.Mirror.IsHidden;
+            if (!downed && active && !hidden && tracked.Mirror.CheckStuck(now) &&
+                now - tracked.LastStuckFix >= StuckFixInterval)
             {
                 tracked.Mirror.ResetStuck(now);
                 tracked.LastStuckFix = now;
@@ -517,23 +521,28 @@ internal static class EnemyTracker
                 continue;
             }
 
-            // Handing over mid-attack would cut the attack off; wait until it's done. Enemies with
-            // always-dangerous parts (e.g. spikes) would never finish, so the wait is capped.
-            if (!downed && tracked.Mirror.IsAttacking)
+            // Handing over mid-attack would cut the attack off; wait until it's done. Same for a hidden
+            // enemy (burrowed, dormant, before its arena entrance): its FSM relies on values set
+            // before it went under (where to come up), which the new owner doesn't have, so it could
+            // end up stuck out of sight. Enemies with always-dangerous parts (e.g. spikes) or that
+            // stay hidden would never finish, so the wait is capped. A downed owner still waits for
+            // hidden enemies, but not for attacks.
+            var attacking = !downed && tracked.Mirror.IsAttacking;
+            if (attacking || hidden)
             {
-                if (tracked.AttackingSince < 0f)
+                if (tracked.BusySince < 0f)
                 {
-                    tracked.AttackingSince = now;
+                    tracked.BusySince = now;
                 }
 
-                if (now - tracked.AttackingSince < MaxAttackHandoverWait)
+                if (now - tracked.BusySince < (hidden ? MaxHiddenHandoverWait : MaxAttackHandoverWait))
                 {
                     continue;
                 }
             }
             else
             {
-                tracked.AttackingSince = -1f;
+                tracked.BusySince = -1f;
             }
 
             Vector2 enemyPos = hm.transform.position;

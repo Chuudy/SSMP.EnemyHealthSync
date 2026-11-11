@@ -138,6 +138,8 @@ public sealed class EnemyStatePacket : IPacketData
 
     private const byte FlagScaleXNegative = 1;
     private const byte FlagActive = 2;
+    private const byte FlagVisible = 4;
+    private const byte FlagKinematic = 8;
 
     public bool IsReliable => false;
     public bool DropReliableDataIfNewerExists => false;
@@ -170,6 +172,33 @@ public sealed class EnemyStatePacket : IPacketData
     public uint HitboxDamaging { get; set; }
 
     /// <summary>
+    /// Whether the enemy's own renderer is on. FSMs hide enemies that are burrowed, dormant or waiting
+    /// for an arena wave, and show them when they emerge or enter; puppets copy it.
+    /// </summary>
+    public bool Visible { get; set; } = true;
+
+    /// <summary>
+    /// Whether the enemy's Rigidbody2D is kinematic on the owner (e.g. while burrowed). A new owner
+    /// takes this over, so an enemy taken over underground doesn't fall through the floor.
+    /// </summary>
+    public bool Kinematic { get; set; }
+
+    /// <summary>
+    /// The enemy's tk2d sprite colour as RGBA bytes (R in the lowest byte). FSMs fade enemies in by
+    /// tweening it from transparent (e.g. flying in at an arena wave); puppets copy it.
+    /// </summary>
+    public uint SpriteColor { get; set; } = 0xFFFFFFFF;
+
+    /// <summary>Bit i: visual object i (effects, particle emitters) is active (activeSelf).</summary>
+    public uint VisualActive { get; set; }
+
+    /// <summary>Bit i: the renderer of visual object i is enabled.</summary>
+    public uint VisualRenderer { get; set; }
+
+    /// <summary>Bit i: the particle system of visual object i is emitting or still has particles (e.g. dust cues).</summary>
+    public uint VisualParticles { get; set; }
+
+    /// <summary>
     /// Active state of each of the enemy's PlayMaker FSMs (in hierarchy order), as an index into
     /// that FSM's state list, or <see cref="NoFsmState"/>. A new owner resumes the AI from these
     /// states instead of the FSM's start state (which is often "asleep").
@@ -187,12 +216,18 @@ public sealed class EnemyStatePacket : IPacketData
         byte flags = 0;
         if (ScaleXNegative) flags |= FlagScaleXNegative;
         if (Active) flags |= FlagActive;
+        if (Visible) flags |= FlagVisible;
+        if (Kinematic) flags |= FlagKinematic;
         packet.Write(flags);
         packet.Write(Clip);
         packet.Write(Hp);
         packet.Write(HitboxActive);
         packet.Write(HitboxColliderEnabled);
         packet.Write(HitboxDamaging);
+        packet.Write(VisualActive);
+        packet.Write(VisualRenderer);
+        packet.Write(VisualParticles);
+        packet.Write(SpriteColor);
 
         var fsmCount = (byte) System.Math.Min(FsmStates.Length, MaxFsms);
         packet.Write(fsmCount);
@@ -210,11 +245,17 @@ public sealed class EnemyStatePacket : IPacketData
         var flags = packet.ReadByte();
         ScaleXNegative = (flags & FlagScaleXNegative) != 0;
         Active = (flags & FlagActive) != 0;
+        Visible = (flags & FlagVisible) != 0;
+        Kinematic = (flags & FlagKinematic) != 0;
         Clip = packet.ReadUShort();
         Hp = packet.ReadInt();
         HitboxActive = packet.ReadUInt();
         HitboxColliderEnabled = packet.ReadUInt();
         HitboxDamaging = packet.ReadUInt();
+        VisualActive = packet.ReadUInt();
+        VisualRenderer = packet.ReadUInt();
+        VisualParticles = packet.ReadUInt();
+        SpriteColor = packet.ReadUInt();
 
         var fsmCount = System.Math.Min((int) packet.ReadByte(), MaxFsms);
         FsmStates = new ushort[fsmCount];

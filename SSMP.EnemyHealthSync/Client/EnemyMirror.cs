@@ -29,6 +29,30 @@ internal sealed class EnemyMirror
     private readonly List<Collider2D?> _hitboxColliders = new();
     private readonly List<DamageHero?> _hitboxDamagers = new();
 
+    /// <summary>The enemy's own renderer; FSMs switch it off while the enemy is burrowed or dormant.</summary>
+    private readonly Renderer? _renderer;
+
+    /// <summary>The enemy's tk2d sprite; FSMs fade it in and out through its colour.</summary>
+    private readonly tk2dBaseSprite? _sprite;
+
+    // Index-aligned: visual object i (effects, dust/particle emitters below the enemy) is
+    // _visualObjects[i] with optional renderer and particle system
+    private const int MaxVisuals = 32;
+    private readonly List<GameObject> _visualObjects = new();
+    private readonly List<Renderer?> _visualRenderers = new();
+    private readonly List<ParticleSystem?> _visualParticles = new();
+
+    /// <summary>Visual objects that are also hitboxes: their active state is synced as a hitbox.</summary>
+    private readonly List<bool> _visualIsHitbox = new();
+
+    // Puppet side: the owner's visual bits from the previous snapshot. Visuals are applied when the
+    // owner's bit changes, because effects switch themselves off when their animation ends.
+    private uint _prevVisualActive, _prevVisualRenderer, _prevVisualParticles;
+    private bool _visualsSynced;
+
+    /// <summary>Puppet side: whether the owner's body was kinematic in its latest snapshot, or null before one arrived.</summary>
+    private bool? _ownerKinematic;
+
     /// <summary>Puppet side: a damager's damage before we set it to 0, to give it back when the owner's is on again.</summary>
     private readonly Dictionary<DamageHero, int> _savedDamage = new();
 
@@ -102,9 +126,58 @@ internal sealed class EnemyMirror
         }
 
         CollectHitboxes();
+        CollectVisuals();
+        _renderer = _go.GetComponent<Renderer>();
+        _sprite = _go.GetComponent<tk2dBaseSprite>();
         _fsms = _go.GetComponentsInChildren<PlayMakerFSM>(true).Take(EnemyStatePacket.MaxFsms).ToArray();
         _body = _go.GetComponent<Rigidbody2D>();
     }
+
+    /// <summary>
+    /// Visual objects: descendants (not the enemy itself) with a renderer or particle system, such
+    /// as dust that warns of an attack from underground or emerge/slam effects. Their FSMs only run
+    /// on the owner, so puppets copy whether they are on.
+    /// </summary>
+    private void CollectVisuals()
+    {
+        var objects = new HashSet<GameObject>();
+        foreach (var r in _go.GetComponentsInChildren<Renderer>(true))
+        {
+            if (r.gameObject != _go)
+            {
+                objects.Add(r.gameObject);
+            }
+        }
+
+        foreach (var ps in _go.GetComponentsInChildren<ParticleSystem>(true))
+        {
+            if (ps.gameObject != _go)
+            {
+                objects.Add(ps.gameObject);
+            }
+        }
+
+        var ordered = objects
+            .Select(o => (Path: RelativePath(o.transform), Object: o))
+            .OrderBy(e => e.Path, StringComparer.Ordinal)
+            .ToList();
+
+        if (ordered.Count > MaxVisuals)
+        {
+            Utils.Log.Debug($"{_go.name} has {ordered.Count} visual objects, only the first {MaxVisuals} are synced");
+        }
+
+        foreach (var (_, obj) in ordered.Take(MaxVisuals))
+        {
+            _visualObjects.Add(obj);
+            _visualRenderers.Add(obj.GetComponent<Renderer>());
+            _visualParticles.Add(obj.GetComponent<ParticleSystem>());
+            _visualIsHitbox.Add(_hitboxObjects.Contains(obj));
+        }
+    }
+
+    /// <summary>Owner side: the enemy is hidden (burrowed, dormant, waiting for its arena wave).</summary>
+    internal bool IsHidden => _renderer != null && !_renderer.enabled;
 
     /// <summary>
     /// Attack hitboxes: the enemy and its descendants that have a DamageHero or Collider2D, in a
@@ -210,6 +283,41 @@ internal sealed class EnemyMirror
         packet.HitboxActive = active;
         packet.HitboxColliderEnabled = colliderEnabled;
         packet.HitboxDamaging = damaging;
+        packet.Visible = _renderer == null || _renderer.enabled;
+        packet.Kinematic = _body != null && _body.bodyType == RigidbodyType2D.Kinematic;
+        packet.SpriteColor = _sprite != null ? PackColor(_sprite.color) : 0xFFFFFFFF;
+
+        uint visualActive = 0, visualRenderer = 0, visualParticles = 0;
+        for (var i = 0; i < _visualObjects.Count; i++)
+        {
+            var obj = _visualObjects[i];
+            if (obj == null)
+            {
+                continue;
+            }
+
+            if (obj.activeSelf)
+            {
+                visualActive |= 1u << i;
+            }
+
+            var r = _visualRenderers[i];
+            if (r != null && r.enabled)
+            {
+                visualRenderer |= 1u << i;
+            }
+
+            // Emit() bursts don't set isEmitting, so live particles count too
+            var ps = _visualParticles[i];
+            if (ps != null && obj.activeInHierarchy && (ps.isEmitting || ps.particleCount > 0))
+            {
+                visualParticles |= 1u << i;
+            }
+        }
+
+        packet.VisualActive = visualActive;
+        packet.VisualRenderer = visualRenderer;
+        packet.VisualParticles = visualParticles;
         packet.FsmStates = CaptureFsmStates();
 
         if (_lastSent != null && now - _lastSentTime < heartbeat && SameState(_lastSent, packet))
@@ -226,7 +334,9 @@ internal sealed class EnemyMirror
         Mathf.Abs(a.X - b.X) < PositionEpsilon && Mathf.Abs(a.Y - b.Y) < PositionEpsilon &&
         a.ScaleXNegative == b.ScaleXNegative && a.Active == b.Active && a.Clip == b.Clip && a.Hp == b.Hp &&
         a.HitboxActive == b.HitboxActive && a.HitboxColliderEnabled == b.HitboxColliderEnabled &&
-        a.HitboxDamaging == b.HitboxDamaging &&
+        a.HitboxDamaging == b.HitboxDamaging && a.Visible == b.Visible && a.Kinematic == b.Kinematic &&
+        a.VisualActive == b.VisualActive && a.VisualRenderer == b.VisualRenderer &&
+        a.VisualParticles == b.VisualParticles && a.SpriteColor == b.SpriteColor &&
         a.FsmStates.AsSpan().SequenceEqual(b.FsmStates);
 
     private ushort[] CaptureFsmStates()
@@ -518,6 +628,8 @@ internal sealed class EnemyMirror
         _lastSnapshotTime = -1f;
         _ownerVelocity = Vector2.zero;
         _stuckSince = -1f;
+        _visualsSynced = false;
+        _ownerKinematic = null;
         _disabledBehaviours.Clear();
         _savedDamage.Clear();
 
@@ -628,7 +740,12 @@ internal sealed class EnemyMirror
 
         if (_body != null)
         {
-            _body.bodyType = _bodyType;
+            // The owner's body type, not the one from when this became a puppet: FSMs make enemies
+            // kinematic while burrowed (with their collider off), and a dynamic body would then
+            // fall through the floor. Static bodies stay static.
+            _body.bodyType = resumeOwnerState && _ownerKinematic.HasValue && _bodyType != RigidbodyType2D.Static
+                ? _ownerKinematic.Value ? RigidbodyType2D.Kinematic : RigidbodyType2D.Dynamic
+                : _bodyType;
 
             // Movement scripts that set the velocity once when a walk starts would otherwise keep
             // walking at the puppet's zero velocity
@@ -675,6 +792,24 @@ internal sealed class EnemyMirror
         }
 
         PlayClip(state.Clip);
+
+        // Hidden while the owner's is (burrowed, dormant, before its arena entrance), shown when it emerges
+        if (_renderer != null && _renderer.enabled != state.Visible)
+        {
+            _renderer.enabled = state.Visible;
+        }
+
+        if (_sprite != null && PackColor(_sprite.color) != state.SpriteColor)
+        {
+            _sprite.color = UnpackColor(state.SpriteColor);
+        }
+
+        if (_body != null)
+        {
+            _ownerKinematic = state.Kinematic;
+        }
+
+        ApplyVisuals(state);
         _ownerFsmStates = state.FsmStates;
         _ownerClip = state.Clip;
         _ownerColliderEnabled = state.HitboxColliderEnabled;
@@ -706,6 +841,93 @@ internal sealed class EnemyMirror
             }
 
             ApplyDamaging(_hitboxDamagers[i], (state.HitboxDamaging & (1u << i)) != 0);
+        }
+    }
+
+    /// <summary>
+    /// Copy the owner's effects: objects switched on/off, renderers, and particles (e.g. the dust that
+    /// shows where an enemy will burst out of the ground). Applied when the owner's bit changes (and
+    /// fully on the first snapshot), because effects end on their own when their animation finishes
+    /// and re-applying the owner's still-on bit would restart them.
+    /// </summary>
+    private void ApplyVisuals(EnemyStatePacket state)
+    {
+        var first = !_visualsSynced;
+        _visualsSynced = true;
+
+        for (var i = 0; i < _visualObjects.Count; i++)
+        {
+            var obj = _visualObjects[i];
+            if (obj == null)
+            {
+                continue;
+            }
+
+            var bit = 1u << i;
+            var active = (state.VisualActive & bit) != 0;
+            if (!_visualIsHitbox[i] && (first || active != ((_prevVisualActive & bit) != 0)) && obj.activeSelf != active)
+            {
+                obj.SetActive(active);
+            }
+
+            var r = _visualRenderers[i];
+            var rendererOn = (state.VisualRenderer & bit) != 0;
+            if (r != null && (first || rendererOn != ((_prevVisualRenderer & bit) != 0)) && r.enabled != rendererOn)
+            {
+                r.enabled = rendererOn;
+            }
+
+            var ps = _visualParticles[i];
+            var particles = (state.VisualParticles & bit) != 0;
+            var wasParticles = (_prevVisualParticles & bit) != 0;
+            if (ps == null || (!first && particles == wasParticles))
+            {
+                continue;
+            }
+
+            try
+            {
+                if (particles && !ps.isEmitting && obj.activeInHierarchy)
+                {
+                    PlayParticles(ps);
+                }
+                else if (!particles && ps.isEmitting)
+                {
+                    // Let the particles already out fade naturally
+                    ps.Stop(false, ParticleSystemStopBehavior.StopEmitting);
+                }
+            }
+            catch (Exception e)
+            {
+                Utils.Log.Debug($"{_go.name}: could not sync particles on '{obj.name}': {e.Message}");
+            }
+        }
+
+        _prevVisualActive = state.VisualActive;
+        _prevVisualRenderer = state.VisualRenderer;
+        _prevVisualParticles = state.VisualParticles;
+    }
+
+    private static uint PackColor(Color c)
+    {
+        Color32 c32 = c;
+        return c32.r | ((uint) c32.g << 8) | ((uint) c32.b << 16) | ((uint) c32.a << 24);
+    }
+
+    private static Color UnpackColor(uint v) =>
+        new Color32((byte) v, (byte) (v >> 8), (byte) (v >> 16), (byte) (v >> 24));
+
+    /// <summary>
+    /// Start a particle effect the owner started. Systems driven only by Emit() bursts have no
+    /// emission of their own, so give those a burst too.
+    /// </summary>
+    private static void PlayParticles(ParticleSystem ps)
+    {
+        ps.Play(false);
+        var emission = ps.emission;
+        if (!emission.enabled || (emission.rateOverTimeMultiplier <= 0f && emission.burstCount == 0))
+        {
+            ps.Emit(15);
         }
     }
 
