@@ -21,6 +21,12 @@ internal sealed class EnemyMirror
     private readonly HealthManager _hm;
     private readonly GameObject _go;
     private readonly tk2dSpriteAnimator? _animator;
+
+    /// <summary>A Unity Animator driving the enemy (bone rigs); synced by state and time.</summary>
+    private readonly Animator? _mecanim;
+
+    /// <summary>Re-align a puppet's Animator when it is this far (normalized time) off the owner's.</summary>
+    private const float AnimatorDriftLimit = 0.2f;
     private readonly Dictionary<tk2dSpriteAnimationClip, ushort> _clipIds = new();
 
     // Index-aligned: hitbox i is _hitboxObjects[i] with optional collider _hitboxColliders[i] and
@@ -129,11 +135,16 @@ internal sealed class EnemyMirror
 
     internal bool IsPuppet { get; private set; }
 
-    internal EnemyMirror(HealthManager hm)
+    /// <summary>
+    /// <paramref name="root"/> is the object that is the whole enemy: usually the HealthManager's,
+    /// or an animated rig the HealthManager is a part of (e.g. a large boss whose health is on its head).
+    /// </summary>
+    internal EnemyMirror(HealthManager hm, GameObject root)
     {
         _hm = hm;
-        _go = hm.gameObject;
-        _animator = _go.GetComponent<tk2dSpriteAnimator>();
+        _go = root;
+        _animator = _go.GetComponent<tk2dSpriteAnimator>() ?? hm.GetComponent<tk2dSpriteAnimator>();
+        _mecanim = _go.GetComponent<Animator>();
 
         var clips = _animator != null && _animator.Library != null ? _animator.Library.clips : null;
         if (clips != null)
@@ -197,6 +208,9 @@ internal sealed class EnemyMirror
             _visualIsHitbox.Add(_hitboxObjects.Contains(obj));
         }
     }
+
+    /// <summary>The object that is the whole enemy (see the constructor).</summary>
+    internal Transform Root => _go.transform;
 
     /// <summary>The enemy's synced FSMs, by index.</summary>
     internal IReadOnlyList<PlayMakerFSM> Fsms => _fsms;
@@ -552,6 +566,7 @@ internal sealed class EnemyMirror
         packet.Visible = _renderer == null || _renderer.enabled;
         packet.Kinematic = _body != null && _body.bodyType == RigidbodyType2D.Kinematic;
         packet.Layer = (byte) Mathf.Clamp(_go.layer, 0, 31);
+        CaptureAnimator(packet);
         packet.SpriteColor = _sprite != null ? PackColor(_sprite.color) : 0xFFFFFFFF;
 
         uint visualActive = 0, visualRenderer = 0, visualParticles = 0;
@@ -602,7 +617,7 @@ internal sealed class EnemyMirror
         a.ScaleXNegative == b.ScaleXNegative && a.Active == b.Active && a.Clip == b.Clip && a.Hp == b.Hp &&
         a.HitboxActive == b.HitboxActive && a.HitboxColliderEnabled == b.HitboxColliderEnabled &&
         a.HitboxDamaging == b.HitboxDamaging && a.Visible == b.Visible && a.Kinematic == b.Kinematic &&
-        a.Layer == b.Layer &&
+        a.Layer == b.Layer && a.AnimatorState == b.AnimatorState &&
         a.VisualActive == b.VisualActive && a.VisualRenderer == b.VisualRenderer &&
         a.VisualParticles == b.VisualParticles && a.SpriteColor == b.SpriteColor &&
         a.FsmStates.AsSpan().SequenceEqual(b.FsmStates);
@@ -1004,7 +1019,9 @@ internal sealed class EnemyMirror
                name.Contains("Flash") ||
                name.Contains("Audio") ||
                name.Contains("Sound") ||
-               name.Contains("Corpse");
+               name.Contains("Corpse") ||
+               name.Contains("Jitter") ||
+               name.Contains("Shake");
     }
 
     /// <summary>
@@ -1104,6 +1121,7 @@ internal sealed class EnemyMirror
         }
 
         PlayClip(state.Clip);
+        ApplyAnimator(state);
 
         // Hidden while the owner's is (burrowed, dormant, before its arena entrance), shown when it emerges
         if (_renderer != null && _renderer.enabled != state.Visible)
@@ -1161,6 +1179,61 @@ internal sealed class EnemyMirror
             }
 
             ApplyDamaging(_hitboxDamagers[i], (state.HitboxDamaging & (1u << i)) != 0);
+        }
+    }
+
+    private void CaptureAnimator(EnemyStatePacket packet)
+    {
+        if (_mecanim == null || !_mecanim.isActiveAndEnabled || _mecanim.runtimeAnimatorController == null)
+        {
+            return;
+        }
+
+        var info = _mecanim.IsInTransition(0) ? _mecanim.GetNextAnimatorStateInfo(0) : _mecanim.GetCurrentAnimatorStateInfo(0);
+        packet.AnimatorState = info.fullPathHash;
+        packet.AnimatorTime = info.normalizedTime;
+    }
+
+    /// <summary>
+    /// Puppet side: a puppet's FSMs, which normally switch its Animator between states, are off, so
+    /// play the owner's state, and re-align when the puppet's drifts too far from the owner's.
+    /// </summary>
+    private void ApplyAnimator(EnemyStatePacket state)
+    {
+        if (_mecanim == null || state.AnimatorState == 0 || !_mecanim.isActiveAndEnabled ||
+            _mecanim.runtimeAnimatorController == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var info = _mecanim.IsInTransition(0) ? _mecanim.GetNextAnimatorStateInfo(0) : _mecanim.GetCurrentAnimatorStateInfo(0);
+            var target = info.loop ? Mathf.Repeat(state.AnimatorTime, 1f) : Mathf.Clamp(state.AnimatorTime, 0f, 0.999f);
+            if (info.fullPathHash == state.AnimatorState)
+            {
+                var current = info.loop ? Mathf.Repeat(info.normalizedTime, 1f) : Mathf.Clamp(info.normalizedTime, 0f, 0.999f);
+                var drift = Mathf.Abs(current - target);
+                if (info.loop)
+                {
+                    drift = Mathf.Min(drift, 1f - drift);
+                }
+
+                if (drift <= AnimatorDriftLimit)
+                {
+                    return;
+                }
+            }
+            else if (!_mecanim.HasState(0, state.AnimatorState))
+            {
+                return;
+            }
+
+            _mecanim.Play(state.AnimatorState, 0, target);
+        }
+        catch (Exception e)
+        {
+            Utils.Log.Debug($"{_go.name}: could not sync its Animator: {e.Message}");
         }
     }
 

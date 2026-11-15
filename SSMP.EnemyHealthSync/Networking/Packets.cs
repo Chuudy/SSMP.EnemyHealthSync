@@ -211,6 +211,15 @@ public sealed class EnemyStatePacket : IPacketData
     /// </summary>
     public byte Layer { get; set; }
 
+    /// <summary>
+    /// Enemies animated by a Unity Animator (bone rigs, e.g. large bosses): the full path hash of
+    /// its current state on layer 0 (the state it is moving to, during a transition), or 0 for none.
+    /// </summary>
+    public int AnimatorState { get; set; }
+
+    /// <summary>How far into <see cref="AnimatorState"/> the owner's Animator is (normalized time).</summary>
+    public float AnimatorTime { get; set; }
+
     /// <summary>Bit i: visual object i (effects, particle emitters) is active (activeSelf).</summary>
     public uint VisualActive { get; set; }
 
@@ -251,6 +260,8 @@ public sealed class EnemyStatePacket : IPacketData
         packet.Write(VisualParticles);
         packet.Write(SpriteColor);
         packet.Write(Layer);
+        packet.Write(AnimatorState);
+        packet.Write(AnimatorTime);
 
         var fsmCount = (byte) System.Math.Min(FsmStates.Length, MaxFsms);
         packet.Write(fsmCount);
@@ -280,6 +291,8 @@ public sealed class EnemyStatePacket : IPacketData
         VisualParticles = packet.ReadUInt();
         SpriteColor = packet.ReadUInt();
         Layer = packet.ReadByte();
+        AnimatorState = packet.ReadInt();
+        AnimatorTime = packet.ReadFloat();
 
         var fsmCount = System.Math.Min((int) packet.ReadByte(), MaxFsms);
         FsmStates = new ushort[fsmCount];

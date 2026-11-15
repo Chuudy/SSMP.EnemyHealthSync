@@ -312,11 +312,17 @@ internal static class EnemyTracker
             id++;
         }
 
+        var root = FindEnemyRoot(hm);
+        if (root != hm.gameObject)
+        {
+            Log.Debug($"{hm.name} ({id}) is part of the animated rig '{root.name}', syncing that as the enemy");
+        }
+
         var tracked = new TrackedEnemy
         {
             Id = id,
             Hm = hm,
-            Mirror = new EnemyMirror(hm),
+            Mirror = new EnemyMirror(hm, root),
             IsBoss = hm.hasSpecialDeath || hm.bigEnemyDeath || hm.initHp >= Config.BossHpThreshold,
             SceneName = hm.gameObject.scene.name,
         };
@@ -353,6 +359,37 @@ internal static class EnemyTracker
         }
 
         return tracked;
+    }
+
+    /// <summary>
+    /// The object that is the whole enemy. Usually the HealthManager's own; but when the
+    /// HealthManager is a part of an animated rig (e.g. a large boss whose health is on its head,
+    /// with its AI and Animator on the rig's root), the nearest ancestor with an Animator, as long
+    /// as no other enemy's HealthManager is below it. Arena containers are never picked.
+    /// </summary>
+    private static GameObject FindEnemyRoot(HealthManager hm)
+    {
+        for (var t = hm.transform.parent; t != null; t = t.parent)
+        {
+            if (t.GetComponent<BattleScene>() != null || t.GetComponent<BattleWave>() != null)
+            {
+                break;
+            }
+
+            if (t.GetComponent<Animator>() == null)
+            {
+                continue;
+            }
+
+            if (t.GetComponentsInChildren<HealthManager>(true).Length != 1)
+            {
+                break;
+            }
+
+            return t.gameObject;
+        }
+
+        return hm.gameObject;
     }
 
     /// <summary>
@@ -1009,7 +1046,7 @@ internal static class EnemyTracker
         }
 
         enemyId = tracked.Id;
-        root = tracked.Hm.transform;
+        root = tracked.Mirror.Root;
         return true;
     }
 
@@ -1022,7 +1059,7 @@ internal static class EnemyTracker
             return false;
         }
 
-        root = tracked.Hm.transform;
+        root = tracked.Mirror.Root;
         return true;
     }
 
