@@ -81,10 +81,10 @@ internal class Server : ServerAddon
         Send(() => _sender!.SendSingleData(PacketId.RoomOwnership, packet, playerId));
     }
 
-    internal static void SendDeath(uint enemyId, ushort playerId)
+    internal static void SendDeath(uint enemyId, ushort playerId, bool special = false)
     {
         Send(() => _sender!.SendCollectionData(PacketId.EnemyDeath,
-            new EnemyDeathPacket { EnemyId = enemyId }, playerId));
+            new EnemyDeathPacket { EnemyId = enemyId, Special = special }, playerId));
     }
 
     /// <summary>

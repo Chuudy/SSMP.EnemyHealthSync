@@ -124,8 +124,24 @@ public sealed class EnemyDeathPacket : IPacketData
 
     public uint EnemyId { get; set; }
 
-    public void WriteData(IPacket packet) => packet.Write(EnemyId);
-    public void ReadData(IPacket packet) => EnemyId = packet.ReadUInt();
+    /// <summary>
+    /// The enemy's own FSM plays its death (a "special death": HP at 0 without HealthManager
+    /// dying). Otherwise it died the normal way, and every copy must die even if its own special
+    /// death happens to be switched on at that moment.
+    /// </summary>
+    public bool Special { get; set; }
+
+    public void WriteData(IPacket packet)
+    {
+        packet.Write(EnemyId);
+        packet.Write(Special);
+    }
+
+    public void ReadData(IPacket packet)
+    {
+        EnemyId = packet.ReadUInt();
+        Special = packet.ReadBool();
+    }
 }
 
 /// <summary>
@@ -189,6 +205,12 @@ public sealed class EnemyStatePacket : IPacketData
     /// </summary>
     public uint SpriteColor { get; set; } = 0xFFFFFFFF;
 
+    /// <summary>
+    /// The enemy's physics layer. Bosses switch layers between phases (an intro layer that doesn't
+    /// touch the floor, a fight layer that does); a new owner must use the owner's.
+    /// </summary>
+    public byte Layer { get; set; }
+
     /// <summary>Bit i: visual object i (effects, particle emitters) is active (activeSelf).</summary>
     public uint VisualActive { get; set; }
 
@@ -228,6 +250,7 @@ public sealed class EnemyStatePacket : IPacketData
         packet.Write(VisualRenderer);
         packet.Write(VisualParticles);
         packet.Write(SpriteColor);
+        packet.Write(Layer);
 
         var fsmCount = (byte) System.Math.Min(FsmStates.Length, MaxFsms);
         packet.Write(fsmCount);
@@ -256,6 +279,7 @@ public sealed class EnemyStatePacket : IPacketData
         VisualRenderer = packet.ReadUInt();
         VisualParticles = packet.ReadUInt();
         SpriteColor = packet.ReadUInt();
+        Layer = packet.ReadByte();
 
         var fsmCount = System.Math.Min((int) packet.ReadByte(), MaxFsms);
         FsmStates = new ushort[fsmCount];

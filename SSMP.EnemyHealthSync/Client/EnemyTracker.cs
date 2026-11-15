@@ -43,6 +43,15 @@ internal static class EnemyTracker
         /// <summary>A remote death arrived while the enemy was inactive; apply it once it activates.</summary>
         internal bool PendingDeath;
 
+        /// <summary>Whether that pending death is a special (FSM-played) one.</summary>
+        internal bool PendingDeathSpecial;
+
+        /// <summary>
+        /// After the owner's special death: when our copy, which carries on the owner's death
+        /// sequence, is killed outright if it hasn't died by then. 0 when not waiting.
+        /// </summary>
+        internal float SpecialDeathDeadline;
+
         /// <summary>When HP first reached 0 without isDead being set (bosses with their own death sequence), or -1.</summary>
         internal float ZeroHpSince = -1f;
 
@@ -132,6 +141,11 @@ internal static class EnemyTracker
     private const float MaxHiddenHandoverWait = 8f;
     private const float HandoverVerticalWeight = 2f;
     private const float StuckFixInterval = 10f;
+
+    /// <summary>How long a copy may play the owner's special death before it is killed outright.</summary>
+    private const float SpecialDeathTimeout = 6f;
+
+    private static bool _cutsceneLogged;
     private const float HandoverMargin = 4f;
     private const float BossHandoverHold = 8f;
     private const float BossHandoverMargin = 8f;
@@ -515,6 +529,22 @@ internal static class EnemyTracker
             }
         }
 
+        // A cutscene or dialogue (control taken away, not by being downed) is often run by an
+        // enemy's FSM on our game, e.g. a boss's intro talking to us. Handing the enemy over would
+        // switch that FSM off and leave us stuck in it, so wait until it's over.
+        if (!downed && hero.controlReqlinquished)
+        {
+            if (!_cutsceneLogged)
+            {
+                _cutsceneLogged = true;
+                Log.Debug("In a cutscene or dialogue: not handing any enemies over until it ends");
+            }
+
+            return;
+        }
+
+        _cutsceneLogged = false;
+
         Vector2 heroPos = hero.transform.position;
         var range = downed ? float.MaxValue : Config.HandoverRange;
 
@@ -704,7 +734,7 @@ internal static class EnemyTracker
         }
     }
 
-    private static void SendDeathIfNew(TrackedEnemy tracked)
+    private static void SendDeathIfNew(TrackedEnemy tracked, bool special = false)
     {
         if (tracked.KnownDead || !tracked.SeenAlive)
         {
@@ -714,8 +744,8 @@ internal static class EnemyTracker
         tracked.KnownDead = true;
         if (Config.SyncDeath)
         {
-            Log.Debug($"Local death of {tracked.Hm.name} ({tracked.Id})");
-            Client.SendDeath(tracked.Id);
+            Log.Debug($"Local {(special ? "special " : "")}death of {tracked.Hm.name} ({tracked.Id})");
+            Client.SendDeath(tracked.Id, special);
         }
     }
 
@@ -790,7 +820,19 @@ internal static class EnemyTracker
 
             if (tracked.PendingDeath)
             {
-                ApplyDeath(tracked);
+                ApplyDeath(tracked, tracked.PendingDeathSpecial);
+                continue;
+            }
+
+            if (tracked.SpecialDeathDeadline > 0f && now >= tracked.SpecialDeathDeadline)
+            {
+                tracked.SpecialDeathDeadline = 0f;
+                if (!hm.isDead)
+                {
+                    Log.Debug($"{hm.name} ({tracked.Id}) didn't finish its owner's death sequence, killing it");
+                    Kill(tracked, forceRegularDeath: true);
+                }
+
                 continue;
             }
 
@@ -886,7 +928,7 @@ internal static class EnemyTracker
         if (now - tracked.ZeroHpSince >= ZeroHpDeathDelay || !hm.gameObject.activeInHierarchy)
         {
             Log.Debug($"{hm.name} ({tracked.Id}) stayed at 0 HP without isDead, treating it as dead");
-            SendDeathIfNew(tracked);
+            SendDeathIfNew(tracked, special: true);
         }
     }
 
@@ -1038,7 +1080,7 @@ internal static class EnemyTracker
         }
     }
 
-    internal static void OnRemoteDeath(uint id)
+    internal static void OnRemoteDeath(uint id, bool special = false)
     {
         if (!Active || !Config.SyncDeath)
         {
@@ -1052,7 +1094,7 @@ internal static class EnemyTracker
             return;
         }
 
-        ApplyDeath(tracked);
+        ApplyDeath(tracked, special);
     }
 
     private static TrackedEnemy? Find(uint id, bool logUnknown)
@@ -1174,7 +1216,7 @@ internal static class EnemyTracker
         }
     }
 
-    private static void ApplyDeath(TrackedEnemy tracked)
+    private static void ApplyDeath(TrackedEnemy tracked, bool special = false)
     {
         tracked.KnownDead = true;
 
@@ -1189,10 +1231,37 @@ internal static class EnemyTracker
         if (!hm.gameObject.activeInHierarchy)
         {
             tracked.PendingDeath = true;
+            tracked.PendingDeathSpecial = special;
             return;
         }
 
         tracked.PendingDeath = false;
+
+        if (special && tracked.Mirror.IsPuppet)
+        {
+            // The owner's FSM is playing the death: carry on from its states (with its variables),
+            // so the same sequence plays here. Killed outright if it doesn't finish.
+            tracked.Mirror.Unpuppetize(resumeOwnerState: true);
+            tracked.SpecialDeathDeadline = Time.unscaledTime + SpecialDeathTimeout;
+            Log.Debug($"Remote special death of {hm.name} ({tracked.Id}): continuing its owner's death sequence");
+            return;
+        }
+
+        Kill(tracked, forceRegularDeath: !special);
+    }
+
+    /// <summary>
+    /// Kill our copy. With <paramref name="forceRegularDeath"/>, it dies even if its special death
+    /// is switched on right now (bosses switch it on during some attacks; Die would then only tell
+    /// the FSM, which may not be in a state that handles it), still telling its FSMs "ZERO HP".
+    /// </summary>
+    private static void Kill(TrackedEnemy tracked, bool forceRegularDeath)
+    {
+        var hm = tracked.Hm;
+        if (hm == null || hm.isDead)
+        {
+            return;
+        }
 
         // Give the enemy its FSMs back so its own death sequence can play, with the owner's variables
         // (e.g. whether it calls another enemy in when it dies)
@@ -1203,7 +1272,17 @@ internal static class EnemyTracker
         try
         {
             hm.hp = 0;
-            hm.Die(null, AttackTypes.Generic, true);
+            if (forceRegularDeath && hm.hasSpecialDeath)
+            {
+                FSMUtility.SendEventToGameObject(hm.gameObject, "ZERO HP");
+                hm.Die(null, AttackTypes.Generic, NailElements.None, null, ignoreEvasion: true,
+                    overrideSpecialDeath: true);
+            }
+            else
+            {
+                hm.Die(null, AttackTypes.Generic, true);
+            }
+
             Log.Debug($"Remote death of {hm.name} ({tracked.Id})");
         }
         catch (Exception e)

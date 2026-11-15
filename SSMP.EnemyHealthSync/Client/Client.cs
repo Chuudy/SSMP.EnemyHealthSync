@@ -28,7 +28,7 @@ internal class Client : ClientAddon
         // Collections are unwrapped by SSMP: the handler is called once per instance.
         receiver.RegisterPacketHandler<EnemyDamagePacket>(PacketId.EnemyDamage, EnemyTracker.OnRemoteDamage);
         receiver.RegisterPacketHandler<EnemyDeathPacket>(PacketId.EnemyDeath,
-            p => EnemyTracker.OnRemoteDeath(p.EnemyId));
+            p => EnemyTracker.OnRemoteDeath(p.EnemyId, p.Special));
         receiver.RegisterPacketHandler<EnemyStatePacket>(PacketId.EnemyState, EnemyTracker.OnRemoteState);
         receiver.RegisterPacketHandler<RoomOwnershipPacket>(PacketId.RoomOwnership, EnemyTracker.OnRoomOwnership);
         receiver.RegisterPacketHandler<PlayerDownedPacket>(PacketId.PlayerDowned,
@@ -106,9 +106,9 @@ internal class Client : ClientAddon
         Send(() => _sender!.SendCollectionData(PacketId.ArenaCleared, new ArenaClearedPacket { ArenaId = arenaId }));
     }
 
-    internal static void SendDeath(uint enemyId)
+    internal static void SendDeath(uint enemyId, bool special = false)
     {
-        Send(() => _sender!.SendCollectionData(PacketId.EnemyDeath, new EnemyDeathPacket { EnemyId = enemyId }));
+        Send(() => _sender!.SendCollectionData(PacketId.EnemyDeath, new EnemyDeathPacket { EnemyId = enemyId, Special = special }));
     }
 
     /// <summary>Tell the room the local player went down / got up, or how far their revive has come.</summary>

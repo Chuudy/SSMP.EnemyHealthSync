@@ -55,6 +55,9 @@ internal sealed class EnemyMirror
 
     /// <summary>Puppet side: whether the owner's enemy was visible, and its sprite colour, in the latest snapshot.</summary>
     private bool? _ownerVisible;
+
+    /// <summary>Puppet side: the owner's physics layer in the latest snapshot.</summary>
+    private int? _ownerLayer;
     private uint? _ownerSpriteColor;
 
     /// <summary>Puppet side: a damager's damage before we set it to 0, to give it back when the owner's is on again.</summary>
@@ -548,6 +551,7 @@ internal sealed class EnemyMirror
         packet.HitboxDamaging = damaging;
         packet.Visible = _renderer == null || _renderer.enabled;
         packet.Kinematic = _body != null && _body.bodyType == RigidbodyType2D.Kinematic;
+        packet.Layer = (byte) Mathf.Clamp(_go.layer, 0, 31);
         packet.SpriteColor = _sprite != null ? PackColor(_sprite.color) : 0xFFFFFFFF;
 
         uint visualActive = 0, visualRenderer = 0, visualParticles = 0;
@@ -598,6 +602,7 @@ internal sealed class EnemyMirror
         a.ScaleXNegative == b.ScaleXNegative && a.Active == b.Active && a.Clip == b.Clip && a.Hp == b.Hp &&
         a.HitboxActive == b.HitboxActive && a.HitboxColliderEnabled == b.HitboxColliderEnabled &&
         a.HitboxDamaging == b.HitboxDamaging && a.Visible == b.Visible && a.Kinematic == b.Kinematic &&
+        a.Layer == b.Layer &&
         a.VisualActive == b.VisualActive && a.VisualRenderer == b.VisualRenderer &&
         a.VisualParticles == b.VisualParticles && a.SpriteColor == b.SpriteColor &&
         a.FsmStates.AsSpan().SequenceEqual(b.FsmStates);
@@ -822,6 +827,13 @@ internal sealed class EnemyMirror
     /// </summary>
     private void RestoreOwnerLook()
     {
+        if (_ownerLayer.HasValue && _go.layer != _ownerLayer.Value)
+        {
+            Utils.Log.Debug($"{_go.name}: restored the owner's layer {LayerMask.LayerToName(_ownerLayer.Value)} " +
+                            $"after resuming (the restart had set {LayerMask.LayerToName(_go.layer)})");
+            _go.layer = _ownerLayer.Value;
+        }
+
         if (_renderer != null && _ownerVisible == true && !_renderer.enabled)
         {
             _renderer.enabled = true;
@@ -929,6 +941,7 @@ internal sealed class EnemyMirror
         _ownerKinematic = null;
         _ownerVisible = null;
         _ownerSpriteColor = null;
+        _ownerLayer = null;
         _disabledBehaviours.Clear();
         _savedDamage.Clear();
 
@@ -1110,6 +1123,11 @@ internal sealed class EnemyMirror
 
         _ownerVisible = state.Visible;
         _ownerSpriteColor = state.SpriteColor;
+        _ownerLayer = state.Layer;
+        if (_go.layer != state.Layer)
+        {
+            _go.layer = state.Layer;
+        }
 
         ApplyVisuals(state);
         _ownerFsmStates = state.FsmStates;

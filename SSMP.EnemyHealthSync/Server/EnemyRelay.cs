@@ -312,7 +312,7 @@ internal static class EnemyRelay
 
         foreach (var target in targets)
         {
-            Server.SendDeath(packet.EnemyId, target);
+            Server.SendDeath(packet.EnemyId, target, packet.Special);
         }
     }
 
