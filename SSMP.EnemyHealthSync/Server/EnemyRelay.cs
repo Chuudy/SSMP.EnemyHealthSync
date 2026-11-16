@@ -260,6 +260,22 @@ internal static class EnemyRelay
         }
     }
 
+    internal static void OnLootDrop(ushort playerId, LootDropPacket packet)
+    {
+        foreach (var target in GetOthersInScene(playerId, out _))
+        {
+            Server.SendLootDrop(packet, target);
+        }
+    }
+
+    internal static void OnLootGone(ushort playerId, LootGonePacket packet)
+    {
+        foreach (var target in GetOthersInScene(playerId, out _))
+        {
+            Server.SendLootGone(packet, target);
+        }
+    }
+
     internal static void OnArenaCleared(ushort playerId, ArenaClearedPacket packet)
     {
         foreach (var target in GetOthersInScene(playerId, out _))

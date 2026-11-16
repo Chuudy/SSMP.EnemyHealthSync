@@ -5,7 +5,7 @@ namespace SSMPEnemyHealthSync.Utils;
 internal static class Config
 {
     public const string ModName = "SSMP.EnemyHealthSync";
-    public const string Version = "1.4.7";
+    public const string Version = "1.4.8";
     public const uint SSMPApiVersion = 1;
 
     private static ConfigEntry<bool>? _enabled;
@@ -13,6 +13,7 @@ internal static class Config
     private static ConfigEntry<bool>? _syncDeath;
     private static ConfigEntry<bool>? _syncMovement;
     private static ConfigEntry<bool>? _syncProjectiles;
+    private static ConfigEntry<bool>? _sharedLoot;
     private static ConfigEntry<int>? _stateSendRate;
     private static ConfigEntry<bool>? _handover;
     private static ConfigEntry<float>? _handoverRange;
@@ -32,6 +33,7 @@ internal static class Config
     public static bool SyncHealth => Enabled && (_syncHealth?.Value ?? true);
     public static bool SyncDeath => Enabled && (_syncDeath?.Value ?? true);
     public static bool SyncMovement => Enabled && (_syncMovement?.Value ?? true);
+    public static bool SharedLoot => Enabled && SyncDeath && (_sharedLoot?.Value ?? true);
     public static bool SyncProjectiles => Enabled && (_syncProjectiles?.Value ?? true);
     public static int StateSendRate => _stateSendRate?.Value ?? 20;
     public static bool Handover => _handover?.Value ?? true;
@@ -61,6 +63,9 @@ internal static class Config
         _syncProjectiles = config.Bind("General", "SyncProjectiles", true,
             "Projectiles an enemy fires appear on every player's game, and can hit every player " +
             "(needs SyncMovement)");
+        _sharedLoot = config.Bind("General", "SharedLoot", true,
+            "Rosaries and shell shards dropped by enemies land in the same places for everyone, and " +
+            "whoever picks a piece up collects it for every player in the room (needs SyncDeath)");
         _stateSendRate = config.Bind("Network", "StateSendRate", 20, new ConfigDescription(
             "How many times per second enemy owners send enemy movement/animation updates",
             new AcceptableValueRange<int>(5, 60)));

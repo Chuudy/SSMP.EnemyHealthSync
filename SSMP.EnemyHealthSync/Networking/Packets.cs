@@ -621,6 +621,70 @@ public sealed class EnemyProjectilePacket : IPacketData
     }
 }
 
+/// <summary>A piece of currency an enemy dropped: everyone spawns it with the same throw.</summary>
+public sealed class LootDropPacket : IPacketData
+{
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    public uint DropId { get; set; }
+
+    /// <summary>Name of the piece's prefab (small/medium/large rosary, shell shard, ...).</summary>
+    public string Prefab { get; set; } = "";
+
+    public float X { get; set; }
+    public float Y { get; set; }
+    public float Z { get; set; }
+    public float VelocityX { get; set; }
+    public float VelocityY { get; set; }
+
+    public void WriteData(IPacket packet)
+    {
+        packet.Write(DropId);
+        packet.Write(Prefab ?? "");
+        packet.Write(X);
+        packet.Write(Y);
+        packet.Write(Z);
+        packet.Write(VelocityX);
+        packet.Write(VelocityY);
+    }
+
+    public void ReadData(IPacket packet)
+    {
+        DropId = packet.ReadUInt();
+        Prefab = packet.ReadString();
+        X = packet.ReadFloat();
+        Y = packet.ReadFloat();
+        Z = packet.ReadFloat();
+        VelocityX = packet.ReadFloat();
+        VelocityY = packet.ReadFloat();
+    }
+}
+
+/// <summary>A shared piece was collected (everyone collects their copy) or broke/burned (everyone removes it).</summary>
+public sealed class LootGonePacket : IPacketData
+{
+    public bool IsReliable => true;
+    public bool DropReliableDataIfNewerExists => false;
+
+    public uint DropId { get; set; }
+
+    /// <summary>0 collected, 1 broken, 2 burned up.</summary>
+    public byte Kind { get; set; }
+
+    public void WriteData(IPacket packet)
+    {
+        packet.Write(DropId);
+        packet.Write(Kind);
+    }
+
+    public void ReadData(IPacket packet)
+    {
+        DropId = packet.ReadUInt();
+        Kind = packet.ReadByte();
+    }
+}
+
 internal static class Packets
 {
     /// <summary>Packet instantiator shared by the client and server receivers.</summary>
@@ -641,6 +705,8 @@ internal static class Packets
             PacketId.ArenaCleared => new PacketDataCollection<ArenaClearedPacket>(),
             PacketId.EnemyFsmVars => new PacketDataCollection<EnemyFsmVarsPacket>(),
             PacketId.EnemyProjectile => new PacketDataCollection<EnemyProjectilePacket>(),
+            PacketId.LootDrop => new PacketDataCollection<LootDropPacket>(),
+            PacketId.LootGone => new PacketDataCollection<LootGonePacket>(),
             _ => throw new System.ArgumentOutOfRangeException(nameof(packetId), packetId, null)
         };
     }

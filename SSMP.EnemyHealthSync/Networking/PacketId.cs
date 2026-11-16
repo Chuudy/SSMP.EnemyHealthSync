@@ -52,4 +52,10 @@ public enum PacketId : byte
 
     /// <summary>Enemy owner -> server -> others in the room: an enemy spawned a projectile (collection).</summary>
     EnemyProjectile = 12,
+
+    /// <summary>Client -> server -> others in the room: a dropped rosary/shard piece was thrown here (collection).</summary>
+    LootDrop = 13,
+
+    /// <summary>Client -> server -> others in the room: a shared piece was picked up (or broke) (collection).</summary>
+    LootGone = 14,
 }

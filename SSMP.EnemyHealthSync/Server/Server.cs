@@ -33,6 +33,8 @@ internal class Server : ServerAddon
         receiver.RegisterPacketHandler<ArenaClearedPacket>(PacketId.ArenaCleared, EnemyRelay.OnArenaCleared);
         receiver.RegisterPacketHandler<EnemyFsmVarsPacket>(PacketId.EnemyFsmVars, EnemyRelay.OnFsmVars);
         receiver.RegisterPacketHandler<EnemyProjectilePacket>(PacketId.EnemyProjectile, EnemyRelay.OnProjectile);
+        receiver.RegisterPacketHandler<LootDropPacket>(PacketId.LootDrop, EnemyRelay.OnLootDrop);
+        receiver.RegisterPacketHandler<LootGonePacket>(PacketId.LootGone, EnemyRelay.OnLootGone);
 
         serverApi.ServerManager.PlayerDisconnectEvent += player => EnemyRelay.OnPlayerDisconnect(player.Id);
         serverApi.ServerManager.ServerShutdownEvent += EnemyRelay.Clear;
@@ -74,6 +76,16 @@ internal class Server : ServerAddon
     internal static void SendProjectile(EnemyProjectilePacket packet, ushort playerId)
     {
         Send(() => _sender!.SendCollectionData(PacketId.EnemyProjectile, packet, playerId));
+    }
+
+    internal static void SendLootDrop(LootDropPacket packet, ushort playerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.LootDrop, packet, playerId));
+    }
+
+    internal static void SendLootGone(LootGonePacket packet, ushort playerId)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.LootGone, packet, playerId));
     }
 
     internal static void SendOwnership(RoomOwnershipPacket packet, ushort playerId)

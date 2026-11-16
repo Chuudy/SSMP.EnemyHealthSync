@@ -34,6 +34,7 @@ public partial class SSMPEnemyHealthSyncPlugin : BaseUnityPlugin
     private void LateUpdate()
     {
         Client.EnemyProjectiles.LateUpdate();
+        Client.SharedLoot.LateUpdate();
     }
 
     private void OnGUI()

@@ -43,6 +43,12 @@ internal static class EnemyTracker
         /// <summary>A remote death arrived while the enemy was inactive; apply it once it activates.</summary>
         internal bool PendingDeath;
 
+        /// <summary>
+        /// Died (or is dying) because of another player's death message: that player's game rolled
+        /// the drops and shares them, so this copy doesn't throw its own.
+        /// </summary>
+        internal bool RemoteDeath;
+
         /// <summary>Whether that pending death is a special (FSM-played) one.</summary>
         internal bool PendingDeathSpecial;
 
@@ -443,6 +449,28 @@ internal static class EnemyTracker
         }
 
         return hash;
+    }
+
+    internal enum DropRole
+    {
+        /// <summary>Not a tracked enemy: its drops are left alone.</summary>
+        Untracked,
+
+        /// <summary>Died here on its own: this game rolls the drops and shares them.</summary>
+        Local,
+
+        /// <summary>Died from another player's death message: that player's drops are used.</summary>
+        Remote,
+    }
+
+    internal static DropRole GetDropRole(HealthManager hm)
+    {
+        if (!Active || !ByHm.TryGetValue(hm, out var tracked))
+        {
+            return DropRole.Untracked;
+        }
+
+        return tracked.RemoteDeath ? DropRole.Remote : DropRole.Local;
     }
 
     /// <summary>For arena diagnostics: whether we run this enemy or follow another player's copy.</summary>
@@ -1260,9 +1288,12 @@ internal static class EnemyTracker
         var hm = tracked.Hm;
         if (hm == null || hm.isDead)
         {
+            // Already died here on its own: this game rolls (or rolled) the drops
             tracked.PendingDeath = false;
             return;
         }
+
+        tracked.RemoteDeath = true;
 
         // Die() on an inactive enemy (e.g. an arena wave that hasn't started) is unsafe; wait for it.
         if (!hm.gameObject.activeInHierarchy)

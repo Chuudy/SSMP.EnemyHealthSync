@@ -430,6 +430,7 @@ internal static class ObjectPoolSpawnPatch
         try
         {
             EnemyProjectiles.OnSpawned(prefab, __result);
+            SharedLoot.OnSpawned(prefab, __result);
         }
         catch (Exception e)
         {

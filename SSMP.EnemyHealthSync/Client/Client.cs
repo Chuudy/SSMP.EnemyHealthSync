@@ -37,6 +37,8 @@ internal class Client : ClientAddon
         receiver.RegisterPacketHandler<EnemyFsmEventPacket>(PacketId.EnemyFsmEvent, EnemyTracker.OnRemoteFsmEvent);
         receiver.RegisterPacketHandler<EnemyFsmVarsPacket>(PacketId.EnemyFsmVars, EnemyTracker.OnRemoteFsmVars);
         receiver.RegisterPacketHandler<EnemyProjectilePacket>(PacketId.EnemyProjectile, EnemyProjectiles.OnRemoteProjectile);
+        receiver.RegisterPacketHandler<LootDropPacket>(PacketId.LootDrop, SharedLoot.OnRemoteDrop);
+        receiver.RegisterPacketHandler<LootGonePacket>(PacketId.LootGone, SharedLoot.OnRemoteGone);
         receiver.RegisterPacketHandler<EnemyDespawnPacket>(PacketId.EnemyDespawn,
             p => EnemyTracker.OnRemoteDespawn(p.EnemyId));
         receiver.RegisterPacketHandler<ArenaClearedPacket>(PacketId.ArenaCleared, p => ArenaSync.OnRemoteCleared(p.ArenaId));
@@ -49,6 +51,7 @@ internal class Client : ClientAddon
 
         EnemyTracker.Init();
         EnemyProjectiles.Init();
+        SharedLoot.Init();
         DownedState.Init();
 
         Log.Info("Client addon initialized");
@@ -84,6 +87,16 @@ internal class Client : ClientAddon
         {
             EnemyId = enemyId, FsmIndex = (byte) fsmIndex, EventName = eventName
         }));
+    }
+
+    internal static void SendLootDrop(LootDropPacket packet)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.LootDrop, packet));
+    }
+
+    internal static void SendLootGone(LootGonePacket packet)
+    {
+        Send(() => _sender!.SendCollectionData(PacketId.LootGone, packet));
     }
 
     internal static void SendProjectile(EnemyProjectilePacket packet)
